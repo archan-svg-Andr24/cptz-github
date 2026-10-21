@@ -1,0 +1,14 @@
+# Зависимости тестового контура (Прил. В) и сборки exe (GEN-17).
+# Нужны только разработчику: приложению для работы эти пакеты не требуются.
+#
+#   py -3.13 -m pip install --no-index --find-links=wheelhouse -r requirements-dev.txt
+
+pytest==9.1.1
+pluggy==1.7.0
+iniconfig==2.3.1
+packaging==26.3
+colorama==0.4.6
+
+# Сборка StudentPlanner.exe (one-folder, GEN-12/GEN-17).
+pyinstaller==6.15.0
+pyinstaller-hooks-contrib==2026.8

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Тесты и инструменты
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Сборка PyInstaller (GEN-12, GEN-17)
+build/
+dist/
+*.manifest
+
+# Локальные базы и журналы: данные пользователя, в репозиторий не попадают
+*.db
+*.db-journal
+logs/
+
+# Среда
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
