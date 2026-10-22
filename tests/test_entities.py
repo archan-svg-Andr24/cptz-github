@@ -229,7 +229,7 @@ def test_acc_m_107_homework_created_and_listed(homework_repo_factory, db, simple
     assert len(repo.all()) == 1
 
 
-def test_acc_m_108_multiple_homework_per_subject_date(homework_repo_factory, db,
+def test_acc_m_110_multiple_homework_per_subject_date(homework_repo_factory, db,
                                                      simple_subjects) -> None:
     """HW-06: несколько заданий на один предмет и дату — норма."""
     repo = homework_repo_factory(db)
@@ -240,7 +240,7 @@ def test_acc_m_108_multiple_homework_per_subject_date(homework_repo_factory, db,
     assert len(items) == 2, "Ограничения уникальности нет"
 
 
-def test_acc_m_109_homework_description_optional(homework_repo_factory, db,
+def test_homework_description_optional(homework_repo_factory, db,
                                                 simple_subjects) -> None:
     """HW-07: описание может отсутствовать, срок обязателен."""
     repo = homework_repo_factory(db)
@@ -248,7 +248,7 @@ def test_acc_m_109_homework_description_optional(homework_repo_factory, db,
     assert item.description is None
 
 
-def test_acc_m_110_toggle_status(homework_repo_factory, db, simple_subjects) -> None:
+def test_acc_m_107_toggle_status(homework_repo_factory, db, simple_subjects) -> None:
     """HW-15: переключение «выполнено» ↔ «активное»."""
     repo = homework_repo_factory(db)
     item = repo.create(simple_subjects[0].id, date(2026, 9, 14), "Реферат")
@@ -261,14 +261,14 @@ def test_acc_m_110_toggle_status(homework_repo_factory, db, simple_subjects) -> 
     assert not undone.completed_at, "При снятии отметки дата очищается"
 
 
-def test_acc_m_111_set_status_explicitly(homework_repo_factory, db, simple_subjects) -> None:
+def test_acc_m_107_set_status_explicitly(homework_repo_factory, db, simple_subjects) -> None:
     repo = homework_repo_factory(db)
     item = repo.create(simple_subjects[0].id, date(2026, 9, 14), "Доклад")
     assert repo.set_status(item.id, HomeworkStatus.DONE).status == HomeworkStatus.DONE
     assert repo.set_status(item.id, HomeworkStatus.ACTIVE).status == HomeworkStatus.ACTIVE
 
 
-def test_acc_m_112_overdue_is_computed_not_stored(homework_repo_factory, db,
+def test_acc_m_109_overdue_is_computed_not_stored(homework_repo_factory, db,
                                                  simple_subjects) -> None:
     """HW-08: «просрочено» — производное состояние (сегодня 20.10.2026)."""
     repo = homework_repo_factory(db)
@@ -283,7 +283,28 @@ def test_acc_m_112_overdue_is_computed_not_stored(homework_repo_factory, db,
     assert repo.require(item.id).is_overdue(today) is False, "Выполненное не просрочено"
 
 
-def test_acc_m_113_homework_deleted_with_subject_blocked(homework_repo_factory, db,
+def test_acc_m_113_homework_group_mark_stays_null(homework_repo_factory, db,
+                                                 simple_subjects) -> None:
+    """ACC-M-113 / HW-01: приложение пишет group_mark = NULL и после создания, и после правки.
+
+    Схема допускает 1 и 2 как задел v1.1, поэтому проверяется именно
+    поведение приложения, а не CHECK-ограничение.
+    """
+    repo = homework_repo_factory(db)
+    item = repo.create(simple_subjects[0].id, date(2026, 9, 14), "Задание")
+    stored = db.fetchone("SELECT group_mark FROM homework WHERE id = ?", (item.id,))
+    assert stored["group_mark"] is None, (
+        f"HW-01: приложение не должно заполнять group_mark, в БД {stored['group_mark']!r}"
+    )
+
+    repo.update(item.id, description="Уточнённое описание")
+    after = db.fetchone("SELECT group_mark FROM homework WHERE id = ?", (item.id,))
+    assert after["group_mark"] is None, (
+        f"HW-01: правка не должна заполнять group_mark, в БД {after['group_mark']!r}"
+    )
+
+
+def test_acc_m_112_homework_deleted_with_subject_blocked(homework_repo_factory, db,
                                                         simple_subjects, subjects) -> None:
     """HW-09: предмет с домашними заданиями не удаляется."""
     repo = homework_repo_factory(db)
@@ -293,7 +314,7 @@ def test_acc_m_113_homework_deleted_with_subject_blocked(homework_repo_factory, 
         subjects.delete(subject.id)
 
 
-def test_acc_m_113_homework_deleted_removes_task(homework_repo_factory, db,
+def test_acc_m_112_homework_deleted_removes_task(homework_repo_factory, db,
                                                 simple_subjects) -> None:
     repo = homework_repo_factory(db)
     item = repo.create(simple_subjects[0].id, date(2026, 9, 14), "Удалить меня")

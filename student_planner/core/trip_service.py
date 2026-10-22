@@ -141,7 +141,11 @@ class TripPlanService:
         plan = DayPlan(day=day, weekday=weekday, has_lessons=has_lessons,
                        confirmation=confirmation)
 
-        if confirmation is not None:
+        # TRIP-02/TRIP-09: явно выбранный шаблон важнее сохранённого
+        # подтверждения. Иначе на уже подтверждённом дне смена шаблона
+        # игнорировалась, и повторное подтверждение оставляло прежний набор.
+        explicit = outbound_template_id is not None or return_template_id is not None
+        if confirmation is not None and not explicit:
             # TRIP-18: набор рейсов подтверждённой даты берётся из подтверждения.
             plan.outbound = (
                 self.templates.by_id(confirmation.outbound_template_id)
@@ -366,12 +370,17 @@ class TripPlanService:
         transport_type: str,
         vehicle: str,
         payment_method: str,
+        template_id: int | None = None,
     ) -> Any:
         """Ручная поездка без подтверждения дня (ACC-M-88).
 
         Участвует в счётчике, остатке и отчётах наравне с остальными; при
         наличии подтверждения связывается с ним, но помечается ``is_manual``,
         поэтому переживает повторное подтверждение и снятие подтверждения.
+
+        ``template_id`` (REP-14, TRIP-02) связывает поездку с шаблоном, из
+        которого она собрана: журнал показывает шаблон, а расчёт последнего
+        использованного шаблона учитывает и ручные поездки.
         """
         confirmation = self.confirmations.by_date(day)
         calculator = self._calculator(day)
@@ -395,6 +404,7 @@ class TripPlanService:
             discount_amount=pricing.discount_amount,
             payment_method=payment_method,
             confirmation_id=confirmation.id if confirmation else None,
+            template_id=template_id,
             tariff_id=pricing.tariff_id,
             period_start_date=state.period_start if is_strelka else None,
             ride_number_in_period=state.ride_number if is_strelka else None,

@@ -288,10 +288,19 @@ class WarningBanner(QFrame):
         return button
 
     def clear_actions(self) -> None:
+        """Убрать кнопки действий.
+
+        ``deleteLater`` выполняет удаление только на следующем проходе цикла
+        событий, поэтому при нескольких обновлениях подряд старые кнопки
+        оставались видимыми и копились. Убираем со слоя сразу, затем планируем
+        удаление.
+        """
         while self.buttons.count():
             item = self.buttons.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
 

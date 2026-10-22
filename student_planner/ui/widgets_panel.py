@@ -275,8 +275,8 @@ class WidgetsPanel(QFrame):
         # Жёсткий setFixedWidth запрещал это: сплиттер не мог изменить размер,
         # и длинные подписи («Документирование программных средств») уходили
         # за край без возможности что-либо сделать.
-        self.setMinimumWidth(240)
-        self.setMaximumWidth(640)
+        self.setMinimumWidth(210)
+        self.setMaximumWidth(560)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.db = db
 

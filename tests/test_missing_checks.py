@@ -500,12 +500,12 @@ def test_acc_m_110_no_badge_for_other_subject(db, anchors, simple_bell,
     assert lesson.homework_count == 0, "На паре другого предмета бейджа нет"
 
 
-def test_acc_m_111_homework_status_labels() -> None:
+def test_homework_status_labels() -> None:
     assert HomeworkStatus.LABELS[HomeworkStatus.ACTIVE] == "Активное"
     assert HomeworkStatus.LABELS[HomeworkStatus.DONE] == "Выполнено"
 
 
-def test_acc_m_112_overdue_filter(db, simple_subjects, homework_repo_factory) -> None:
+def test_acc_m_109_overdue_filter(db, simple_subjects, homework_repo_factory) -> None:
     repo = homework_repo_factory(db)
     subject = simple_subjects[0]
     overdue = repo.create(subject.id, date(2026, 10, 1), "Просрочено")
@@ -515,7 +515,7 @@ def test_acc_m_112_overdue_filter(db, simple_subjects, homework_repo_factory) ->
     assert [item.id for item in found] == [overdue.id]
 
 
-def test_acc_m_113_homework_subject_reference_protects_delete(db, simple_subjects,
+def test_acc_m_112_homework_subject_reference_protects_delete(db, simple_subjects,
                                                               homework_repo_factory,
                                                               subjects) -> None:
     repo = homework_repo_factory(db)

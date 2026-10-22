@@ -277,8 +277,8 @@ class GridEditorDialog(BaseDialog):
         answer = QMessageBox.question(
             self, "Вернуть стартовый набор",
             f"Восстановить строки {caption} недели из стартового набора?\n"
-            "Оверрайды дат, профили звонков и второй тип недели не затрагиваются "
-            "(GRID-11).",
+            "Изменения расписания на отдельные даты, профили звонков и второй тип "
+            "недели не затрагиваются (GRID-11).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

@@ -460,6 +460,82 @@ def test_override_delete_orphans(override_service, monday_lower, simple_bell,
     assert override_service.for_date(monday_lower) == []
 
 
+def test_edit_changes_override_fields(override_service, monday_lower, simple_bell,
+                                      simple_subjects) -> None:
+    """OVR-01/OVR-09: правка оверрайда реально сохраняет новые значения.
+
+    Регрессия: ``OverrideService.edit`` передавал ``subject_id``/``teacher``/
+    ``room``, а репозиторий принимает изменения только через ``new_*``. Правка
+    молча не сохранялась — пользователь видел прежний предмет.
+    """
+    created = override_service.add(
+        monday_lower, simple_bell.id, 3,
+        subject_id=simple_subjects[0].id, teacher="Иванов", room="101",
+    )
+    edited = override_service.edit(
+        created.id,
+        subject_id=simple_subjects[1].id,
+        teacher="Петров",
+        room="202",
+        comment="правка",
+    )
+
+    assert edited.subject_id == simple_subjects[1].id, (
+        f"OVR-01: предмет не изменился, остался {edited.subject_id}"
+    )
+    assert edited.teacher == "Петров", "OVR-01: преподаватель не изменился"
+    assert edited.room == "202", "OVR-01: кабинет не изменился"
+    assert edited.comment == "правка", "OVR-01: комментарий не сохранён"
+
+
+def test_edit_keeps_override_type(override_service, monday_lower, simple_bell,
+                                  simple_subjects) -> None:
+    """OVR-08: правка не меняет тип изменения."""
+    from student_planner.core.models import OverrideType
+
+    created = override_service.add(
+        monday_lower, simple_bell.id, 3, subject_id=simple_subjects[0].id
+    )
+    edited = override_service.edit(created.id, subject_id=simple_subjects[1].id)
+
+    assert edited.override_type == OverrideType.ADD, (
+        f"OVR-08: тип стал {edited.override_type}, ожидался add"
+    )
+    assert edited.id == created.id, "Правка не должна создавать вторую запись"
+
+
+def test_edit_added_lesson_stays_not_orphan(override_service, monday_lower,
+                                            simple_bell, simple_subjects) -> None:
+    """ALG-10: правка добавленной пары не создаёт сиротский ``replace``.
+
+    Регрессия: кнопка «Заменить» у добавленной пары создавала ``replace`` на
+    слоте, которого нет в сетке. ALG-10 считала его сиротским, и пользователь
+    видел предупреждение «изменение ссылается на занятие, которого нет».
+    """
+    from student_planner.core.day_resolution import DayResolver
+    from student_planner.core.models import LessonStatus
+
+    created = override_service.add(
+        monday_lower, simple_bell.id, 3, subject_id=simple_subjects[0].id
+    )
+    lesson = [
+        item for item in DayResolver(override_service.db).resolve(monday_lower).lessons
+        if item.slot_no == 3
+    ][0]
+    assert lesson.status == LessonStatus.ADDED
+
+    override_service.edit(lesson.override_id, subject_id=simple_subjects[1].id)
+
+    assert override_service.orphans() == [], (
+        "ALG-10: правка добавленной пары породила сиротский оверрайд"
+    )
+    remaining = override_service.for_date(monday_lower)
+    assert len(remaining) == 1, (
+        f"Ожидалась одна запись ``add``, стало {[o.override_type for o in remaining]}"
+    )
+    assert remaining[0].id == created.id
+
+
 # ===========================================================================
 # SCH-09 — сброс изменений даты
 # ===========================================================================
@@ -496,6 +572,95 @@ def test_override_can_cancel_requires_template(override_service, monday_lower,
                                                simple_bell) -> None:
     assert override_service.can_cancel(monday_lower, simple_bell.id, 1) is True
     assert override_service.can_cancel(monday_lower, simple_bell.id, 3) is False
+
+
+# ===========================================================================
+# OVR-04/OVR-08/ALG-10 — отмена добавленной пары не создаёт сироту
+# ===========================================================================
+def test_cancel_added_lesson_removes_it(override_service, monday_lower,
+                                        simple_bell, simple_subjects) -> None:
+    """OVR-04: отмена пары, добавленной вручную, удаляет её.
+
+    Регрессия: ``cancel`` создавал оверрайд ``cancel`` на блоке, которого нет
+    в сетке. ALG-10 считала его сиротским — появлялось предупреждение «изменение
+    ссылается на занятие, которого нет в сетке», а закрыть его было нечем.
+    """
+    override_service.add(
+        monday_lower, simple_bell.id, 3, subject_id=simple_subjects[0].id
+    )
+    assert len(override_service.for_date(monday_lower)) == 1
+
+    override_service.cancel(monday_lower, simple_bell.id, 3)
+
+    remaining = override_service.for_date(monday_lower)
+    assert remaining == [], (
+        f"После отмены добавленной пары остались записи: "
+        f"{[(o.override_type, o.slot_no) for o in remaining]}"
+    )
+    assert override_service.orphans() == [], (
+        "ALG-10: отмена добавленной пары породила сиротское изменение"
+    )
+
+
+def test_cancel_added_lesson_leaves_no_warning(override_service, monday_lower,
+                                               simple_bell, simple_subjects) -> None:
+    """SCH-17: после отмены добавленной пары предупреждения нет."""
+    override_service.add(
+        monday_lower, simple_bell.id, 3, subject_id=simple_subjects[0].id
+    )
+    override_service.cancel(monday_lower, simple_bell.id, 3)
+
+    assert override_service.warnings_for_date(monday_lower) == []
+
+
+def test_cancel_added_lesson_allows_repeat(override_service, monday_lower,
+                                           simple_bell, simple_subjects) -> None:
+    """OVR-08: повторная отмена не упирается в «уже есть изменение».
+
+    Регрессия: после отмены добавленной пары ``add`` оставался, занятие
+    продолжало показываться, кнопка «Отменить» оставалась активной, а повторное
+    нажатие давало ошибку «допускается только одно из отмены или замены».
+    """
+    override_service.add(
+        monday_lower, simple_bell.id, 3, subject_id=simple_subjects[0].id
+    )
+    override_service.cancel(monday_lower, simple_bell.id, 3)
+    # Повторная отмена не должна падать с RuleViolationError.
+    override_service.cancel(monday_lower, simple_bell.id, 3)
+
+
+def test_second_add_on_same_slot_rejected(override_service, monday_lower,
+                                          simple_bell, simple_subjects) -> None:
+    """OVR-08: два добавления в один блок запрещены.
+
+    Регрессия: второй ``add`` проходил молча, в базе оказывались две пары на
+    одном блоке, а показывалась только одна — скрытый дубль.
+    """
+    override_service.add(
+        monday_lower, simple_bell.id, 3, subject_id=simple_subjects[0].id
+    )
+    with pytest.raises(RuleViolationError):
+        override_service.add(
+            monday_lower, simple_bell.id, 3, subject_id=simple_subjects[1].id
+        )
+    records = override_service.for_date(monday_lower)
+    assert len(records) == 1, (
+        f"В блоке 3 должно остаться одно добавление, стало {len(records)}"
+    )
+
+
+def test_cancel_template_lesson_still_works(override_service, monday_lower,
+                                            simple_bell, templates,
+                                            simple_subjects) -> None:
+    """OVR-04: обычная отмена пары из сетки не изменилась."""
+    templates.set_cell(simple_bell.id, "lower", 2, simple_subjects[1].id)
+    created = override_service.cancel(monday_lower, simple_bell.id, 2)
+
+    assert created.override_type == OverrideType.CANCEL
+    assert created.subject_id == simple_subjects[1].id, (
+        "Предмет из сетки должен сохраниться в изменении"
+    )
+    assert override_service.orphans() == []
 
 
 # ===========================================================================

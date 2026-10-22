@@ -171,6 +171,15 @@ class TripTemplateRepository:
         leg_list = list(legs) if legs is not None else None
         if leg_list is not None:
             _validate_template(new_direction, new_name, leg_list)
+        # Способ оплаты шаблона выводится из рейсов так же, как при создании:
+        # схема (Б.13) допускает только 'strelka'/'debit_card', а у шаблона из
+        # одной электрички автобусного рейса нет — тогда NULL.
+        if default_payment_method is not None:
+            new_default = default_payment_method
+        elif leg_list is not None:
+            new_default = _infer_default_payment(leg_list)
+        else:
+            new_default = current.default_payment_method
         with self.db.transaction() as conn:
             conn.execute(
                 "UPDATE trip_templates SET direction = ?, name = ?, default_payment_method = ?, "
@@ -178,8 +187,7 @@ class TripTemplateRepository:
                 (
                     new_direction,
                     new_name.strip(),
-                    current.default_payment_method if default_payment_method is None
-                    else default_payment_method,
+                    new_default,
                     current.depart_hint if depart_hint is None else depart_hint,
                     current.arrive_hint if arrive_hint is None else arrive_hint,
                     current.note if note is None else note,

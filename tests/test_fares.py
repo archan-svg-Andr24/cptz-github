@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+import inspect
 
 import pytest
 
@@ -267,7 +268,7 @@ def test_stage_kind_selection_by_number() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ACC-M-92 — базовая цена и экономия неотрицательны.
+# ACC-M-92 — единая автобусная цена: номер маршрута на стоимость не влияет.
 # ---------------------------------------------------------------------------
 def test_acc_m_92_amounts_non_negative(tariffs) -> None:
     tariffs.create("bus_base", "73.00", date(2026, 9, 1))
@@ -280,6 +281,38 @@ def test_acc_m_92_amounts_non_negative(tariffs) -> None:
     assert pricing.base_price >= ZERO
     assert pricing.paid_price >= ZERO, "Стоимость не может быть отрицательной (DATA-13)"
     assert pricing.discount_amount >= ZERO
+
+
+def test_acc_m_92_route_number_does_not_affect_price(tariffs) -> None:
+    """FARE-04: номер маршрута не участвует в расчёте — две поездки стоят одинаково.
+
+    В `price_ride` номер маршрута вообще не передаётся: в модели поездки это
+    справочное поле `vehicle`, а цена зависит только от вида транспорта,
+    способа оплаты, даты и ступени «Стрелки».
+    """
+    tariffs.create("bus_base", "73.00", date(2026, 9, 1))
+    resolver = TariffResolver(tariffs.all())
+    same_day = date(2026, 10, 1)
+
+    first = price_ride(
+        resolver, ride_date=same_day, transport_type="bus",
+        payment_method="debit_card",
+    )
+    second = price_ride(
+        resolver, ride_date=same_day, transport_type="bus",
+        payment_method="debit_card",
+    )
+
+    assert first.base_price == Decimal("73.00"), (
+        f"FARE-04: базовая цена автобуса = bus_base, получено {first.base_price}"
+    )
+    assert first == second, (
+        "FARE-04/[У-17]: стоимость не зависит от номера маршрута, "
+        f"получено {first} и {second}"
+    )
+    assert "route_number" not in inspect.signature(price_ride).parameters, (
+        "FARE-04/[У-17]: номер маршрута не должен участвовать в расчёте цены"
+    )
 
 
 def test_discount_never_exceeds_base(tariffs) -> None:

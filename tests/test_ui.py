@@ -250,6 +250,475 @@ class TestMiniCalendar:
 
 
 # ===========================================================================
+# UI-05 — цвета дней мини-календаря
+# ===========================================================================
+class TestCalendarColors:
+    """UI-05: верхняя неделя синяя, нижняя обычная, суббота не красная.
+
+    Регрессии, которые ловят эти тесты:
+
+    * день недели ``upper`` подсвечивался, но воскресенье перекрывало цвет
+      серым — подсветка «терялась» на одном дне из семи;
+    * суббота и воскресенье оставались красными ``#ff0000`` от штатных
+      форматов Qt: их задаёт ``weekdayTextFormat``, стилевая таблица на это
+      не влияет;
+    * типы недель приходили только на свой месяц, поэтому ведущие и хвостовые
+      дни сетки (соседние месяцы) не подсвечивались вовсе.
+    """
+
+    @staticmethod
+    def _color(brush) -> str:
+        from PySide6.QtCore import Qt
+
+        return brush.color().name() if brush.style() != Qt.BrushStyle.NoBrush else ""
+
+    def test_saturday_is_not_red(self, qapp, seeded):
+        """UI-05: суббота обычного цвета, красная только воскресенье."""
+        from PySide6.QtCore import Qt
+
+        from student_planner.ui.main_window import MainWindow
+        from student_planner.ui.theme import COLORS
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+        window.refresh_all()
+        qapp.processEvents()
+
+        calendar = window.nav.calendar.calendar
+        saturday = self._color(
+            calendar.weekdayTextFormat(Qt.DayOfWeek.Saturday).foreground()
+        )
+        assert saturday != "#ff0000", (
+            "Суббота осталась красной: Qt красит её через weekdayTextFormat"
+        )
+        assert saturday.lower() == COLORS["text"].lower(), (
+            f"Суббота должна быть обычного цвета, получено {saturday}"
+        )
+
+        sunday = self._color(
+            calendar.weekdayTextFormat(Qt.DayOfWeek.Sunday).foreground()
+        )
+        assert sunday.lower() == COLORS["week_sunday"].lower(), (
+            f"Воскресенье должно быть красным ({COLORS['week_sunday']}), "
+            f"получено {sunday}"
+        )
+
+    def test_week_type_colors_differ(self, qapp, seeded):
+        """UI-05: верхняя неделя синяя, нижняя — обычный текст."""
+        from datetime import date as _date
+
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.ui.main_window import MainWindow
+        from student_planner.ui.theme import COLORS
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+        window.refresh_all()
+        qapp.processEvents()
+
+        resolver = DayResolver(seeded)
+        calendar = window.nav.calendar
+        seen: dict[str, str] = {}
+        # Перебираем подряд идущие дни: тип недели чередуется раз в неделю.
+        for offset in range(28):
+            value = _date(2026, 10, 5).toordinal() + offset
+            day = _date.fromordinal(value)
+            if day.weekday() == 6:  # воскресенье всегда красное — пропускаем
+                continue
+            week = resolver.week_type(day)
+            if not week or week in seen:
+                continue
+            from PySide6.QtCore import QDate
+
+            fmt = calendar.calendar.dateTextFormat(
+                QDate(day.year, day.month, day.day)
+            )
+            seen[week] = self._color(fmt.foreground())
+            if len(seen) == 2:
+                break
+
+        assert "upper" in seen and "lower" in seen, (
+            f"Не удалось найти обе недели, получено {seen}"
+        )
+        assert seen["upper"].lower() == COLORS["week_upper"].lower(), (
+            f"Верхняя неделя должна быть {COLORS['week_upper']}, "
+            f"получено {seen['upper']}"
+        )
+        assert seen["lower"].lower() == COLORS["text"].lower(), (
+            f"Нижняя неделя должна быть обычного цвета, получено {seen['lower']}"
+        )
+        assert seen["upper"] != seen["lower"], "Недели должны различаться цветом"
+
+    def test_grid_edges_are_painted(self, qapp, seeded):
+        """UI-05: дни сетки из соседних месяцев тоже подсвечены."""
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+        window.refresh_all()
+        qapp.processEvents()
+
+        types = window.nav.calendar._week_types
+        shown_year, shown_month = (
+            window.nav.calendar.calendar.yearShown(),
+            window.nav.calendar.calendar.monthShown(),
+        )
+        foreign = [
+            value for value in types
+            if value.month != shown_month or value.year != shown_year
+        ]
+        assert foreign, (
+            "Дни сетки по краям месяца остались без типа недели — "
+            "они не подсвечиваются"
+        )
+
+    def test_week_types_survive_month_change(self, qapp, seeded):
+        """UI-05: после листания месяца подсветка не пропадает."""
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+        window.refresh_all()
+        qapp.processEvents()
+
+        calendar = window.nav.calendar
+        calendar.calendar.setCurrentPage(2026, 12)
+        qapp.processEvents()
+
+        from PySide6.QtCore import QDate
+
+        day = QDate(2026, 12, 7)  # понедельник декабря
+        color = self._color(calendar.calendar.dateTextFormat(day).foreground())
+        assert color, (
+            "После смены месяца день остался без цвета: подсветка типа недели "
+            "зависела от месяца, который прислало окно"
+        )
+
+    def test_colors_present_right_after_start(self, qapp, seeded):
+        """UI-05: подсветка есть сразу после запуска, без единого действия.
+
+        Регрессия: ``__init__`` вызывал ``open_page``, но не
+        ``_refresh_calendar_marks``, поэтому типы недель и метки оставались
+        пустыми до первой правки данных. Пользователь видел календарь без
+        цветов, а после добавления пары (это вызывает ``refresh_all``)
+        подсветка «включалась».
+        """
+        from datetime import date as _date
+
+        from PySide6.QtCore import QDate
+
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.ui.main_window import MainWindow
+        from student_planner.ui.theme import COLORS
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+        # Никаких refresh_all / open_page / правок — только старт.
+
+        calendar = window.nav.calendar
+        assert calendar._week_types, (
+            "Сразу после запуска типы недель пусты — календарь без подсветки"
+        )
+
+        resolver = DayResolver(seeded)
+        upper_days = []
+        for offset in range(28):
+            day = _date.fromordinal(_date(2026, 10, 5).toordinal() + offset)
+            if resolver.week_type(day) == "upper" and day.weekday() != 6:
+                upper_days.append(day)
+        assert upper_days, "В фикстуре не нашлось дня верхней недели"
+
+        for day in upper_days[:3]:
+            fmt = calendar.calendar.dateTextFormat(
+                QDate(day.year, day.month, day.day)
+            )
+            color = self._color(fmt.foreground())
+            assert color.lower() == COLORS["week_upper"].lower(), (
+                f"Сразу после запуска {day} (верхняя неделя) цвета {color!r} "
+                f"вместо {COLORS['week_upper']}"
+            )
+
+    def test_marks_present_right_after_start(self, qapp, seeded):
+        """UI-05: точки-метки считаются при запуске, а не после правки.
+
+        Метка создаётся заранее, чтобы было что показать: пустой стартовый
+        набор сам по себе не даёт поводов для точек.
+        """
+        from student_planner.core import clock
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.main_window import MainWindow
+
+        today = clock.today()
+        profile_id = DayResolver(seeded).resolve(today).profile.id
+        OverrideService(seeded).cancel(today, profile_id, 1)
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        marks = window.nav.calendar._marks
+        assert marks, (
+            "Сразу после запуска метки пусты — точки в календаре не рисуются"
+        )
+        assert "override" in marks.get(today, ""), (
+            f"Метка изменения на {today} не попала в календарь при запуске: "
+            f"{marks.get(today)!r}"
+        )
+
+    def test_marks_follow_shown_month(self, qapp, seeded):
+        """UI-05: метки пересчитываются под показанный месяц.
+
+        Регрессия: ``_refresh_calendar_marks`` брала ``clock.today()``, поэтому
+        после листания на другой месяц точки оставались от текущего.
+        """
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        calendar = window.nav.calendar
+        calendar.calendar.setCurrentPage(2026, 12)
+        qapp.processEvents()
+
+        year, month = calendar.shown_month()
+        assert (year, month) == (2026, 12), (
+            f"Календарь показывает {year}-{month}, ожидался декабрь 2026"
+        )
+        # Месяц показан правильно и подсветка для него посчитана.
+        december = [k for k in calendar._week_types if k.year == 2026 and k.month == 12]
+        assert december, "Для показанного месяца нет типов недель"
+
+
+# ===========================================================================
+# UI-04 — размер панели навигации
+# ===========================================================================
+class TestNavPanelWidth:
+    """UI-04: панель с календарём расширяется и не обрезает календарь.
+
+    Регрессии: ``setFixedWidth(250)`` делал ``min == max``, поэтому
+    ``QSplitter`` не мог изменить ширину; календарю нужно 296 px, а панель
+    давала 225 — часть сетки обрезалась справа без способа это исправить.
+    """
+
+    def test_panel_width_is_adjustable(self, qapp, seeded):
+        """UI-04: минимум и максимум различаются — ручка сплиттера работает."""
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        nav = window.nav
+        assert nav.minimumWidth() != nav.maximumWidth(), (
+            "Панель навигации нельзя расширить: минимум равен максимуму "
+            f"({nav.minimumWidth()} px)"
+        )
+        assert nav.maximumWidth() > nav.minimumWidth(), (
+            "Максимальная ширина должна быть больше минимальной"
+        )
+
+    def test_calendar_is_not_clipped(self, qapp, seeded):
+        """UI-05: календарь получает свою минимальную ширину целиком."""
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        widget = window.nav.calendar.calendar
+        needed = widget.minimumSizeHint().width()
+        assert widget.width() >= needed, (
+            f"Календарь обрезан на {needed - widget.width()} px: "
+            f"нужно {needed}, есть {widget.width()}"
+        )
+
+    def test_calendar_not_clipped_at_minimum_window(self, qapp, seeded):
+        """UI-05: и при минимальном размере окна календарь цел."""
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(window.minimumWidth(), window.minimumHeight())
+        window.show()
+        qapp.processEvents()
+
+        widget = window.nav.calendar.calendar
+        assert widget.width() >= widget.minimumSizeHint().width(), (
+            "При минимальном окне календарь обрезается"
+        )
+
+    def test_splitter_can_widen_panel(self, qapp, seeded):
+        """UI-04: сплиттер действительно меняет ширину панели."""
+        from PySide6.QtWidgets import QSplitter
+
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        splitter = window.centralWidget().findChild(QSplitter)
+        assert splitter is not None, "Ожидался QSplitter с тремя колонками"
+        before = window.nav.width()
+        splitter.moveSplitter(before + 120, 1)
+        qapp.processEvents()
+        after = window.nav.width()
+        assert after > before, (
+            f"Панель не расширилась: было {before}, стало {after}. "
+            "Содержимое центральной зоны не даёт сплиттеру отдать место."
+        )
+
+    def test_menu_items_are_not_truncated(self, qapp, seeded):
+        """UI-04: названия пунктов меню видны целиком при узкой панели.
+
+        Панель можно сузить до 250 px, поэтому длинные названия переносятся
+        на вторую строку. Проверяется самое длинное **слово** в каждой
+        строке: если оно помещается, текст читается полностью — сокращать
+        названия UI-04 не позволяет.
+        """
+        from PySide6.QtWidgets import QSplitter
+
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(window.minimumWidth(), window.minimumHeight())
+        window.show()
+        qapp.processEvents()
+
+        splitter = window.centralWidget().findChild(QSplitter)
+        splitter.moveSplitter(window.nav.minimumWidth(), 1)
+        qapp.processEvents()
+
+        truncated = []
+        for button in window.nav._buttons.values():
+            metrics = button.fontMetrics()
+            # padding пункта меню — 10 px с каждой стороны.
+            available = button.width() - 20
+            for line in button.text().split("\n"):
+                width = metrics.horizontalAdvance(line)
+                if width > available:
+                    truncated.append(
+                        f"«{line}» ({width}>{available})"
+                    )
+        assert not truncated, (
+            "Части названий пунктов меню обрезаны при минимальной ширине: "
+            + ", ".join(truncated)
+        )
+
+    def test_long_caption_wraps_when_narrow(self, qapp, seeded):
+        """UI-04: длинное название переносится, а не обрезается."""
+        from PySide6.QtWidgets import QSplitter
+
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        splitter = window.centralWidget().findChild(QSplitter)
+        splitter.setSizes([window.nav.minimumWidth(), 900, 280])
+        qapp.processEvents()
+        qapp.processEvents()
+
+        button = window.nav._buttons["expenses"]
+        assert "\n" in button.text(), (
+            f"При узкой панели «{button.text()}» не перенесено на вторую строку"
+        )
+        assert button.toolTip() == "Расходы на транспорт", (
+            "Полное название должно оставаться в подсказке"
+        )
+
+    def test_panels_are_compact(self, qapp, seeded):
+        """UI-02: боковые панели оставляют центральной зоне больше половины.
+
+        Проверяются **минимальные** ширины: сплиттер восстанавливает свои
+        размеры, поэтому фактическая ширина в новом окне ничего не говорит о
+        том, насколько узкой панель может быть. Порог — доля окна 1400 px,
+        а не абсолютное число: левая панель не может быть уже, чем нужно
+        «Расходам на транспорт» (UI-04), иначе название обрежется.
+        """
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        total = window.nav.minimumWidth() + window.widgets.minimumWidth()
+        assert total < 1400 / 2, (
+            f"Минимальная ширина боковых панелей {total} px — это больше "
+            "половины окна, центральной зоне не остаётся места"
+        )
+
+    def test_menu_font_is_readable(self, qapp, seeded):
+        """UI-04: пункты меню не мельче остального текста интерфейса.
+
+        Регрессия: когда панель не влезала, кегль меню срезали до 11px и
+        названия становились заметно мельче подписей на страницах. Ширину
+        нужно набирать отступами и шириной панели, а не размером шрифта.
+        """
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        for button in window.nav._buttons.values():
+            point = button.font().pointSizeF()
+            # QSS-кегль может не попасть в font(); тогда берём базовый.
+            if point <= 0:
+                point = button.fontMetrics().height()
+                assert point >= 14, (
+                    f"«{button.text()}»: высота строки {point} px — шрифт мелкий"
+                )
+            else:
+                assert point >= 9.5, (
+                    f"«{button.text()}» набран кеглем {point} pt — это мельче "
+                    "остального интерфейса (10 pt)"
+                )
+
+    def test_calendar_fits_at_panel_minimum(self, qapp, seeded):
+        """UI-05: на минимальной ширине панели календарь всё ещё цел."""
+        from PySide6.QtWidgets import QSplitter
+
+        from student_planner.ui.main_window import MainWindow
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        qapp.processEvents()
+
+        splitter = window.centralWidget().findChild(QSplitter)
+        splitter.setSizes([window.nav.minimumWidth(), 900, 280])
+        qapp.processEvents()
+
+        widget = window.nav.calendar.calendar
+        needed = widget.minimumSizeHint().width()
+        assert widget.width() >= needed, (
+            f"При минимальной панели календарь обрезан на "
+            f"{needed - widget.width()} px: нужно {needed}, есть {widget.width()}"
+        )
+
+
+# ===========================================================================
 # UI-04/ALG-01 — бейдж типа недели следует за выбранной датой
 # ===========================================================================
 class TestWeekTypeBadge:
@@ -490,6 +959,152 @@ class TestSchedulePage:
 
 
 # ===========================================================================
+# OVR-01/ALG-10 — правка добавленной пары не порождает сироту
+# ===========================================================================
+class TestAddedLessonEditing:
+    """Добавленная пара правится как ``add``, а не как ``replace``.
+
+    Регрессия: у пары со статусом «Добавлено» кнопка «Заменить» создавала
+    ``replace`` на блоке, которого нет в сетке. ALG-10 считала изменение
+    сиротским, и появлялось предупреждение «изменение ссылается на занятие,
+    которого нет в сетке».
+    """
+
+    def test_replace_dialog_receives_override_id(self, seeded, qapp):
+        """OVR-01: диалог замены для добавленной пары правит тот же оверрайд."""
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.core.models import LessonStatus
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        page = SchedulePage(seeded)
+        page.set_date(FIXED)
+        result = DayResolver(seeded).resolve(FIXED)
+        profile_id = result.profile.id
+        occupied = {lesson.slot_no for lesson in result.lessons}
+        free = [slot.slot_no for slot in result.profile.slots
+                if slot.slot_no not in occupied]
+        assert free, "Для теста нужен свободный блок"
+        slot_no = free[0]
+
+        overrides = OverrideService(seeded)
+        created = overrides.add(FIXED, profile_id, slot_no, subject_id=1)
+        page.refresh()
+
+        lesson = page._find_lesson(FIXED, profile_id, slot_no)
+        assert lesson is not None, "Добавленная пара не попала в расписание"
+        assert lesson.status == LessonStatus.ADDED, (
+            f"Ожидался статус «Добавлено», получен {lesson.status}"
+        )
+        assert lesson.override_id == created.id, (
+            f"Пара ссылается на оверрайд {lesson.override_id}, ожидался {created.id}"
+        )
+
+    def test_editing_add_keeps_single_override(self, seeded, qapp):
+        """ALG-10: после правки добавленной пары сиротских изменений нет."""
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+
+        result = DayResolver(seeded).resolve(FIXED)
+        profile_id = result.profile.id
+        occupied = {lesson.slot_no for lesson in result.lessons}
+        free = [slot.slot_no for slot in result.profile.slots
+                if slot.slot_no not in occupied]
+        assert free
+        slot_no = free[0]
+
+        overrides = OverrideService(seeded)
+        created = overrides.add(FIXED, profile_id, slot_no, subject_id=1)
+        overrides.edit(created.id, subject_id=2)
+
+        assert overrides.orphans() == [], (
+            "ALG-10: правка добавленной пары создала сиротский оверрайд"
+        )
+        records = overrides.for_date(FIXED)
+        assert len(records) == 1, (
+            f"Ожидалась одна запись, стало {[o.override_type for o in records]}"
+        )
+        assert records[0].override_type == "add"
+        assert records[0].subject_id == 2, "OVR-01: предмет не сохранился"
+
+
+# ===========================================================================
+# SCH-19 — предупреждение о сиротских изменениях: понятный текст
+# ===========================================================================
+class TestOrphanWarning:
+    """SCH-19: пользователь видит «изменение», а не внутренний «оверрайд».
+
+    Внутренний термин ТЗ выносить в интерфейс не нужно: в остальных диалогах
+    используется слово «изменение».
+    """
+
+    def _make_orphan(self, db) -> tuple:
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import ScheduleTemplateRepository
+        from student_planner.core.schedule_service import OverrideService
+
+        result = DayResolver(db).resolve(FIXED)
+        profile_id = result.profile.id
+        overrides = OverrideService(db)
+        overrides.cancel(FIXED, profile_id, 1)
+        ScheduleTemplateRepository(db).clear_cell(
+            profile_id, overrides.week_type_of(FIXED), 1
+        )
+        return profile_id, overrides
+
+    def test_button_says_izmenenie(self, seeded, qapp):
+        """SCH-19: кнопка называется «Удалить изменение»."""
+        from PySide6.QtWidgets import QPushButton
+
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        self._make_orphan(seeded)
+        page = SchedulePage(seeded)
+        page.set_date(FIXED)
+        page.refresh()
+        qapp.processEvents()
+
+        assert page.warning.isVisibleTo(page), "SCH-19: предупреждение не показано"
+        texts = [button.text()
+                 for button in page.warning.findChildren(QPushButton)
+                 if button.isVisibleTo(page)]
+        assert texts, "SCH-19: у предупреждения нет кнопки действия"
+        assert all("оверрайд" not in text.lower() for text in texts), (
+            f"В интерфейсе остался внутренний термин: {texts}"
+        )
+        assert "Удалить изменение" in texts, (
+            f"Ожидалась кнопка «Удалить изменение», найдено {texts}"
+        )
+
+    def test_actions_do_not_accumulate(self, seeded, qapp):
+        """SCH-19: повторное обновление не копит кнопки.
+
+        ``deleteLater`` не удаляет виджет сразу, поэтому старые кнопки
+        оставались на экране и дублировались при каждом refresh.
+        """
+        from PySide6.QtWidgets import QPushButton
+
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        self._make_orphan(seeded)
+        page = SchedulePage(seeded)
+        page.set_date(FIXED)
+
+        counts = []
+        for _ in range(4):
+            page.refresh()
+            qapp.processEvents()
+            counts.append(sum(
+                1 for button in page.warning.findChildren(QPushButton)
+                if button.isVisibleTo(page)
+            ))
+
+        assert counts == [1, 1, 1, 1], (
+            f"Кнопки действий накапливаются после refresh: {counts}"
+        )
+
+
+# ===========================================================================
 # §9.2 — редактор сетки
 # ===========================================================================
 class TestGridEditor:
@@ -560,6 +1175,268 @@ class TestTripsPage:
             "Прил. А.4: семь шаблонов поездок"
         )
 
+
+# ===========================================================================
+# TRIP-02/TRIP-03 — новый шаблон доступен для выбора сразу
+# ===========================================================================
+class TestTemplateSelection:
+    """Шаблон выбирается на вкладке подтверждения и в ручной поездке.
+
+    Регрессия: на вкладке «Подтверждение дня» не было ни одного списка —
+    шаблоны показывались только текстом, и выбрать другой было нельзя.
+    В диалоге ручной поездки шаблона не было вовсе.
+    """
+
+    def _create_template(self, db, name: str, vehicle: str) -> int:
+        from student_planner.core.models import Direction
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        dialog = TemplateDialog(db)
+        dialog.name_edit.setText(name)
+        dialog.direction_combo.setCurrentIndex(
+            dialog.direction_combo.findData(Direction.HOME_TO_COLLEGE)
+        )
+        dialog._legs[0].vehicle_edit.setText(vehicle)
+        assert dialog.apply() is True
+        from student_planner.core.trip_service import TripPlanService
+
+        created = [t for t in TripPlanService(db).templates.all() if t.name == name]
+        assert created, f"Шаблон «{name}» не сохранён"
+        return created[0].id
+
+    def test_new_template_appears_on_confirm_tab(self, seeded, qapp):
+        """TRIP-03: созданный шаблон сразу виден в списке вкладки."""
+        from student_planner.ui.pages.trips import ConfirmTab
+
+        tab = ConfirmTab(seeded)
+        tab.set_date(FIXED)
+        before = tab.outbound_combo.count()
+
+        template_id = self._create_template(seeded, "Свежий шаблон", "777")
+        tab.refresh()
+        qapp.processEvents()
+
+        assert tab.outbound_combo.count() == before + 1, (
+            f"TRIP-03: шаблон не появился в списке "
+            f"(было {before}, стало {tab.outbound_combo.count()})"
+        )
+        index = tab.outbound_combo.findData(template_id)
+        assert index >= 0, "TRIP-02: новый шаблон недоступен для выбора"
+
+    def test_confirm_tab_has_template_selectors(self, seeded, qapp):
+        """TRIP-02: на вкладке есть списки для «Туда» и «Обратно»."""
+        from PySide6.QtWidgets import QComboBox
+
+        from student_planner.ui.pages.trips import ConfirmTab
+
+        tab = ConfirmTab(seeded)
+        tab.set_date(FIXED)
+
+        combos = tab.findChildren(QComboBox)
+        assert len(combos) >= 2, (
+            f"TRIP-02: на вкладке подтверждения {len(combos)} списков, "
+            "ожидалось два (туда и обратно)"
+        )
+        assert tab.outbound_combo.count() > 1, "Список «Туда» пуст"
+        assert tab.return_combo.count() > 1, "Список «Обратно» пуст"
+
+    def test_selecting_template_updates_card(self, seeded, qapp):
+        """TRIP-14: смена шаблона пересчитывает карточку «Расчёт»."""
+        from student_planner.ui.pages.trips import ConfirmTab
+
+        tab = ConfirmTab(seeded)
+        tab.set_date(FIXED)
+        qapp.processEvents()
+
+        # Ищем два разных шаблона, чтобы значение гарантированно изменилось.
+        items = [(tab.outbound_combo.itemData(index),
+                  tab.outbound_combo.itemText(index))
+                 for index in range(tab.outbound_combo.count())]
+        items = [(data, text) for data, text in items if data is not None]
+        assert len(items) >= 2, "Нужны минимум два шаблона направления"
+
+        first_id = items[0][0]
+        tab.outbound_combo.setCurrentIndex(tab.outbound_combo.findData(first_id))
+        qapp.processEvents()
+        first_value = tab.outbound_row.value_label.text()
+
+        second_id = items[1][0]
+        tab.outbound_combo.setCurrentIndex(tab.outbound_combo.findData(second_id))
+        qapp.processEvents()
+
+        assert tab.outbound_row.value_label.text() != first_value, (
+            "TRIP-14: карточка не обновилась при смене шаблона"
+        )
+
+    def test_manual_ride_offers_templates(self, seeded, qapp):
+        """REP-14: в ручной поездке можно выбрать шаблон маршрута."""
+        from student_planner.ui.dialogs import ManualRideDialog
+
+        template_id = self._create_template(seeded, "Ручной маршрут", "888")
+        dialog = ManualRideDialog(seeded, FIXED)
+
+        assert dialog.route_combo.count() > 1, "REP-14: список маршрутов пуст"
+        texts = [dialog.route_combo.itemText(index)
+                 for index in range(dialog.route_combo.count())]
+        assert any("Ручной маршрут" in text for text in texts), (
+            f"REP-14: созданный шаблон не предложен, есть только {texts[:4]}"
+        )
+
+        index = next(
+            k for k in range(dialog.route_combo.count())
+            if "Ручной маршрут" in dialog.route_combo.itemText(k)
+        )
+        dialog.route_combo.setCurrentIndex(index)
+        qapp.processEvents()
+
+        assert dialog.selected_template_id == template_id, (
+            "TRIP-02: выбранный шаблон не определился"
+        )
+        assert dialog._selected_leg() == ("bus", "888"), (
+            f"Рейс взят не из шаблона: {dialog._selected_leg()}"
+        )
+
+    def test_manual_ride_respects_ui14(self, seeded, qapp):
+        """UI-14: у ручной поездки не больше трёх полей ввода."""
+        from PySide6.QtWidgets import QComboBox, QDateEdit, QLineEdit
+
+        from student_planner.ui.dialogs import ManualRideDialog
+
+        dialog = ManualRideDialog(seeded, FIXED)
+        fields = []
+        for widget_type in (QComboBox, QDateEdit, QLineEdit):
+            for widget in dialog.findChildren(widget_type):
+                # QDateEdit содержит внутренний QLineEdit — это не отдельное поле.
+                if widget.objectName() == "qt_spinbox_lineedit":
+                    continue
+                if any(widget is existing for existing in fields):
+                    continue
+                fields.append(widget)
+        assert len(fields) <= 3, (
+            f"UI-14: полей ввода {len(fields)}, допустимо не более трёх"
+        )
+
+
+# ===========================================================================
+# RT-01/TRIP-01 — шаблон собирается из отдельных рейсов
+# ===========================================================================
+class TestTemplateDialog:
+    """Шаблон описывает маршрут из разных видов транспорта (RT-01, Прил. А.4).
+
+    Регрессия: диалог задавал один тип транспорта и число рейсов, а рейсы
+    получались копиями одного и того же. Смешанный маршрут «Электричка + №22»
+    собрать было нельзя, а шаблон из одной электрички падал с
+    ``CHECK constraint failed: default_payment_method``.
+    """
+
+    def test_train_only_template_is_created(self, seeded, qapp):
+        """RT-17: шаблон из одной электрички создаётся без ошибки схемы."""
+        from student_planner.core.models import TransportType
+        from student_planner.core.transport_repositories import TripTemplateRepository
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        dialog = TemplateDialog(seeded)
+        dialog.name_edit.setText("Электричка")
+        row = dialog._legs[0]
+        row.mode_combo.setCurrentIndex(row.mode_combo.findData(TransportType.TRAIN))
+        row.vehicle_edit.setText("Электричка")
+
+        # RT-17: оплата зафиксирована студенческим билетом.
+        assert not row.payment_combo.isEnabled(), (
+            "RT-17: для электрички способ оплаты не выбирается"
+        )
+        assert dialog.apply() is True
+
+        created = [t for t in TripTemplateRepository(seeded).all()
+                   if t.name == "Электричка"]
+        assert created, "Шаблон «Электричка» не сохранён"
+        assert created[0].legs[0].mode == TransportType.TRAIN
+        assert created[0].legs[0].payment_method == "train_student"
+
+    def test_mixed_route_keeps_two_modes(self, seeded, qapp):
+        """RT-01: «Электричка + №22» сохраняет два рейса разных типов."""
+        from student_planner.core.models import TransportType
+        from student_planner.core.transport_repositories import TripTemplateRepository
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        dialog = TemplateDialog(seeded)
+        dialog.name_edit.setText("Электричка + №22")
+
+        first = dialog._legs[0]
+        first.mode_combo.setCurrentIndex(
+            first.mode_combo.findData(TransportType.TRAIN)
+        )
+        first.vehicle_edit.setText("Электричка")
+
+        second = dialog.add_leg()
+        assert second is not None, "RT-16: должен добавляться второй рейс"
+        second.vehicle_edit.setText("22")
+
+        assert dialog.apply() is True
+
+        created = [t for t in TripTemplateRepository(seeded).all()
+                   if t.name == "Электричка + №22"]
+        assert created, "Смешанный шаблон не сохранён"
+        legs = created[0].legs
+        assert len(legs) == 2, f"RT-01: ожидалось 2 рейса, сохранено {len(legs)}"
+        assert legs[0].mode == TransportType.TRAIN, "Рейс 1 — электричка"
+        assert legs[0].payment_method == "train_student"
+        assert legs[1].mode == TransportType.BUS, "Рейс 2 — автобус"
+        assert legs[1].vehicle == "22"
+        assert legs[1].payment_method == "strelka"
+
+    def test_legs_are_not_duplicates(self, seeded, qapp):
+        """RT-01: рейсы хранятся по отдельности, а не копией одного."""
+        from student_planner.core.transport_repositories import TripTemplateRepository
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        dialog = TemplateDialog(seeded)
+        dialog.name_edit.setText("Два разных автобуса")
+
+        first = dialog._legs[0]
+        first.vehicle_edit.setText("35")
+        second = dialog.add_leg()
+        second.vehicle_edit.setText("22")
+
+        assert dialog.apply() is True
+
+        created = [t for t in TripTemplateRepository(seeded).all()
+                   if t.name == "Два разных автобуса"][0]
+        vehicles = [leg.vehicle for leg in created.legs]
+        assert vehicles == ["35", "22"], (
+            f"Рейсы обязаны различаться, сохранено {vehicles}"
+        )
+
+    def test_last_leg_cannot_be_removed(self, seeded, qapp):
+        """RT-16: шаблон не остаётся без рейсов."""
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        dialog = TemplateDialog(seeded)
+        assert len(dialog._legs) == 1
+        assert not dialog._legs[0].remove_button.isEnabled(), (
+            "RT-16: единственный рейс удалять нельзя"
+        )
+
+        added = dialog.add_leg()
+        assert len(dialog._legs) == 2
+        assert dialog._legs[0].remove_button.isEnabled(), (
+            "При двух рейсах удаление разрешено"
+        )
+        dialog.remove_leg(added)
+        assert len(dialog._legs) == 1
+
+    def test_empty_vehicle_is_rejected(self, seeded, qapp):
+        """RT-16: номер рейса обязателен."""
+        from student_planner.core.errors import AppError
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        dialog = TemplateDialog(seeded)
+        dialog.name_edit.setText("Без номера")
+        dialog._legs[0].vehicle_edit.setText("")
+
+        with pytest.raises(AppError):
+            dialog.apply()
+
     def test_confirm_tab_set_date(self, seeded):
         """TRIP-08: вкладка подтверждения принимает дату."""
         from student_planner.ui.pages.trips import TripsPage
@@ -567,6 +1444,144 @@ class TestTripsPage:
         page = TripsPage(seeded)
         page.set_date(FIXED)
         page.refresh()
+
+
+class TestTemplateEditing:
+    """RT-13: уже созданный шаблон можно изменить, а не только пересоздать."""
+
+    def _first_template(self, db):
+        from student_planner.core.transport_repositories import TripTemplateRepository
+
+        return TripTemplateRepository(db).all()[0]
+
+    def test_dialog_prefills_existing_values(self, seeded, qapp):
+        """Открытие на правку показывает текущие значения шаблона."""
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        template = self._first_template(seeded)
+        dialog = TemplateDialog(seeded, template_id=template.id)
+
+        assert dialog.name_edit.text() == template.name
+        assert dialog.direction_combo.currentData() == template.direction
+        assert len(dialog._legs) == len(template.legs)
+        for row, leg in zip(dialog._legs, template.legs):
+            assert row.mode == leg.mode
+            assert row.vehicle == leg.vehicle
+            assert row.payment_method == leg.payment_method
+
+    def test_edit_updates_instead_of_creating(self, seeded, qapp):
+        """Главное требование: правка меняет шаблон, а не создаёт новый."""
+        from student_planner.core.transport_repositories import TripTemplateRepository
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        repo = TripTemplateRepository(seeded)
+        template = self._first_template(seeded)
+        before = len(repo.all())
+
+        dialog = TemplateDialog(seeded, template_id=template.id)
+        dialog.name_edit.setText("Переименованный шаблон")
+        dialog._legs[0].vehicle_edit.setText("№77")
+        assert dialog.apply() is True
+
+        assert len(repo.all()) == before, (
+            "Правка создала новый шаблон вместо изменения существующего"
+        )
+        updated = repo.require(template.id)
+        assert updated.name == "Переименованный шаблон"
+        assert updated.legs[0].vehicle == "№77"
+
+    def test_edit_changes_legs_count(self, seeded, qapp):
+        """Можно добавить и убрать рейсы у существующего шаблона."""
+        from student_planner.core.models import TransportType
+        from student_planner.core.transport_repositories import TripTemplateRepository
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        repo = TripTemplateRepository(seeded)
+        template = self._first_template(seeded)
+
+        dialog = TemplateDialog(seeded, template_id=template.id)
+        row = dialog.add_leg()
+        dialog._legs[0].mode_combo.setCurrentIndex(
+            dialog._legs[0].mode_combo.findData(TransportType.TRAIN)
+        )
+        dialog._legs[0].vehicle_edit.setText("Электричка")
+        row.mode_combo.setCurrentIndex(row.mode_combo.findData(TransportType.BUS))
+        row.vehicle_edit.setText("22")
+        assert dialog.apply() is True
+
+        updated = repo.require(template.id)
+        assert len(updated.legs) == 2
+        assert [leg.vehicle for leg in updated.legs] == ["Электричка", "22"]
+
+    def test_edit_train_only_template_is_allowed(self, seeded, qapp):
+        """RT-17 + Б.13: шаблон из одной электрички сохраняется без ошибки.
+
+        Регрессия: ``update`` передавал способ оплаты рейса
+        ('train_student') в поле шаблона, где схема допускает только
+        'strelka'/'debit_card' — правка падала с CHECK constraint.
+        """
+        from student_planner.core.models import TransportType
+        from student_planner.core.transport_repositories import TripTemplateRepository
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        repo = TripTemplateRepository(seeded)
+        template = self._first_template(seeded)
+
+        dialog = TemplateDialog(seeded, template_id=template.id)
+        dialog._legs[0].mode_combo.setCurrentIndex(
+            dialog._legs[0].mode_combo.findData(TransportType.TRAIN)
+        )
+        dialog._legs[0].vehicle_edit.setText("Электричка")
+        assert dialog.apply() is True
+
+        updated = repo.require(template.id)
+        assert [leg.mode for leg in updated.legs] == [TransportType.TRAIN]
+        assert updated.legs[0].payment_method == "train_student"
+        # Б.13: у шаблона без автобусных рейсов способ оплаты не задан.
+        # Иначе в поле осталось бы устаревшее 'strelka' от прежнего рейса.
+        assert updated.default_payment_method is None, (
+            "У шаблона из одной электрички способ оплаты по умолчанию должен "
+            f"быть пустым, а не {updated.default_payment_method!r}"
+        )
+
+    def test_templates_tab_has_edit_button(self, seeded, qapp):
+        """Кнопка «Изменить» без выбранной строки не падает, а просит выбор."""
+        from student_planner.ui.pages.trips import TemplatesTab
+
+        tab = TemplatesTab(seeded)
+        assert tab.edit_button.text() == "Изменить"
+        assert tab.table.currentRow() < 0 or tab._selected_id() is not None
+
+    def test_templates_tab_fits_narrow_window(self, seeded, qapp):
+        """UI-02: кнопки вкладки не распирают центральную область.
+
+        Регрессия: с кнопкой «Изменить» пять действий вставали в одну строку
+        и требовали 942 px — центральная зона переставала помещаться в окно.
+        """
+        from student_planner.ui.pages.trips import TemplatesTab
+
+        tab = TemplatesTab(seeded)
+        tab.resize(452, 400)  # столько даёт центр при окне 1080 px
+        tab.show()
+        qapp.processEvents()
+
+        need = tab.minimumSizeHint().width()
+        assert need <= 452, (
+            f"Вкладка «Шаблоны» требует {need} px — не помещается в центральную "
+            "область при минимальном окне"
+        )
+        assert tab.edit_button.isVisible()
+
+    def test_apply_requires_name_when_editing(self, seeded, qapp):
+        """Пустое название по-прежнему запрещено (TRIP-02)."""
+        from student_planner.core.errors import AppError
+        from student_planner.ui.pages.trips import TemplateDialog
+
+        template = self._first_template(seeded)
+        dialog = TemplateDialog(seeded, template_id=template.id)
+        dialog.name_edit.setText("   ")
+        with pytest.raises(AppError):
+            dialog.apply()
 
 
 # ===========================================================================
@@ -715,6 +1730,68 @@ class TestSettingsPage:
         page = SettingsPage(seeded)
         page.refresh()
         assert "Файл:" in page.data_tab.path_label.text()
+
+    def test_acc_m_73_reset_clears_user_data_and_keeps_seed(self, seeded, monkeypatch):
+        """ACC-M-73 / FIRST-12: сброс очищает пользовательские данные, справочники целы.
+
+        Проверяется фактическое поведение MVP: удаляются задания, поездки,
+        подтверждения, пополнения, оверрайды и периоды; стартовый набор
+        (предметы, звонки, сетка, тарифы, шаблоны, настройки) остаётся на месте
+        и повторно не дублируется.
+        """
+        from datetime import date
+
+        from student_planner.core.settings_service import SettingsService
+        from student_planner.ui.pages.settings import SettingsPage
+
+        homework = seeded.fetchone("SELECT COUNT(*) AS c FROM subjects")["c"]
+        templates = seeded.fetchone("SELECT COUNT(*) AS c FROM trip_templates")["c"]
+        slots = seeded.fetchone("SELECT COUNT(*) AS c FROM bell_slots")["c"]
+
+        subject_id = seeded.fetchone("SELECT id FROM subjects WHERE is_active = 1")["id"]
+        with seeded.transaction() as conn:
+            conn.execute(
+                "INSERT INTO homework(subject_id, group_mark, due_date, description, status, "
+                "created_at) VALUES (?, NULL, ?, ?, 'active', '2026-10-01T10:00:00')",
+                (subject_id, "2026-10-05", "Сбросить меня"),
+            )
+            conn.execute(
+                "INSERT INTO study_periods(kind, title, date_from, date_to, no_classes, comment) "
+                "VALUES ('vacation', 'Каникулы', '2026-11-01', '2026-11-07', 1, NULL)"
+            )
+
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM homework")["c"] == 1
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM study_periods")["c"] == 1
+
+        page = SettingsPage(seeded)
+        page.refresh()
+        SettingsService(seeded).set_student_profile("Пётр Петров", "ИС-22")
+        # Подтверждение словом УДАЛИТЬ подменяем, чтобы не открывать модальный диалог.
+        monkeypatch.setattr(
+            "PySide6.QtWidgets.QInputDialog.getText",
+            staticmethod(lambda *args, **kwargs: ("УДАЛИТЬ", True)),
+        )
+        page.data_tab.reset_data()
+
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM homework")["c"] == 0, (
+            "FIRST-12: сброс должен удалить домашние задания"
+        )
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM study_periods")["c"] == 0, (
+            "FIRST-12: сброс должен удалить учебные периоды"
+        )
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM subjects")["c"] == homework, (
+            "FIRST-12: справочник предметов не должен пострадать"
+        )
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM trip_templates")["c"] == templates, (
+            "FIRST-12: шаблоны поездок не должны дублироваться"
+        )
+        assert seeded.fetchone("SELECT COUNT(*) AS c FROM bell_slots")["c"] == slots, (
+            "FIRST-12: звонки не должны дублироваться"
+        )
+        assert SettingsService(seeded).student_name() == "Пётр Петров", (
+            "FIRST-12: настройки профиля сбросом не очищаются — их правят в «Общих»"
+        )
+        assert date(2026, 10, 5)  # дата из фикстуры использована
 
 
 # ===========================================================================

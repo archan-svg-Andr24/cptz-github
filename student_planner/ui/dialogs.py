@@ -134,14 +134,20 @@ class BaseDialog(QDialog):
 class ConfirmTripsDialog(BaseDialog):
     """Подтверждение поездок дня: два шаблона и одна кнопка (UI-14)."""
 
-    def __init__(self, db, day: date, parent: QWidget | None = None) -> None:
+    def __init__(self, db, day: date, parent: QWidget | None = None,
+                 *, outbound_template_id: int | None = None,
+                 return_template_id: int | None = None) -> None:
         super().__init__(parent, f"Поездки на {format_display(day)}")
         self.db = db
         self.day = day
         self.service = TripPlanService(db)
         self._error_label = self.error_label()
 
-        plan = self.service.plan(day)
+        plan = self.service.plan(
+            day,
+            outbound_template_id=outbound_template_id,
+            return_template_id=return_template_id,
+        )
 
         form = QFormLayout()
         form.setSpacing(8)
@@ -288,16 +294,24 @@ class CancelLessonDialog(BaseDialog):
 # OVR-05 — замена пары
 # ===========================================================================
 class ReplaceLessonDialog(BaseDialog):
-    """Замена пары: предмет, преподаватель, кабинет, время, комментарий."""
+    """Замена пары: предмет, преподаватель, кабинет, время, комментарий.
+
+    Если передан ``override_id``, диалог правит существующее изменение
+    (``OVR-01``) вместо создания замены. Это путь для пары, добавленной через
+    ``add``: в сетке её нет, поэтому ``replace`` на том же блоке был бы
+    сиротским (ALG-10).
+    """
 
     def __init__(self, db, day: date, profile_id: int, slot_no: int,
-                 caption: str, parent: QWidget | None = None) -> None:
+                 caption: str, parent: QWidget | None = None,
+                 *, override_id: int | None = None) -> None:
         super().__init__(parent, "Заменить пару")
         self.db = db
         self.service = OverrideService(db)
         self.day = day
         self.profile_id = profile_id
         self.slot_no = slot_no
+        self.override_id = override_id
         self._error_label = self.error_label()
 
         info = QLabel(f"{format_display(day)}: {caption}")
@@ -345,12 +359,25 @@ class ReplaceLessonDialog(BaseDialog):
         subject_id = self.subject_combo.currentData()
         if subject_id is None:
             raise AppError("Выберите предмет для замены (OVR-05).")
+        teacher = self.teacher_edit.text().strip() or None
+        room = self.room_edit.text().strip() or None
+        comment = self.comment_edit.text().strip() or None
+        if self.override_id is not None:
+            # OVR-09: правим блок целиком, тип изменения сохраняется.
+            self.service.edit(
+                self.override_id,
+                subject_id=subject_id,
+                teacher=teacher,
+                room=room,
+                comment=comment,
+            )
+            return True
         self.service.replace(
             self.day, self.profile_id, self.slot_no,
             subject_id=subject_id,
-            teacher=self.teacher_edit.text().strip() or None,
-            room=self.room_edit.text().strip() or None,
-            comment=self.comment_edit.text().strip() or None,
+            teacher=teacher,
+            room=room,
+            comment=comment,
         )
         return True
 
@@ -463,7 +490,13 @@ class TopUpDialog(BaseDialog):
 # REP-14 — ручная поездка
 # ===========================================================================
 class ManualRideDialog(BaseDialog):
-    """Ручная поездка: дата, направление, способ оплаты — три поля (UI-14)."""
+    """Ручная поездка: дата, направление с шаблоном, оплата (REP-14, UI-14).
+
+    UI-14 разрешает ручной поездке не более трёх полей. Поэтому направление и
+    шаблон объединены в одном списке: каждый пункт описывает маршрут целиком
+    («Дом → Колледж · №22 + электричка»). Это сохраняет выбор шаблона (TRIP-02)
+    и укладывается в лимит.
+    """
 
     def __init__(self, db, day: date, parent: QWidget | None = None) -> None:
         super().__init__(parent, "Ручная поездка")
@@ -477,10 +510,10 @@ class ManualRideDialog(BaseDialog):
         self.date_edit = _date_edit(day)
         form.addRow("Дата:", self.date_edit)
 
-        self.direction_combo = QComboBox()
-        for value in Direction.ALL:
-            self.direction_combo.addItem(Direction.label(value), value)
-        form.addRow("Направление:", self.direction_combo)
+        # REP-14/TRIP-02: маршрут = направление + шаблон в одном поле.
+        self.route_combo = QComboBox()
+        self._fill_routes()
+        form.addRow("Маршрут:", self.route_combo)
 
         self.payment_combo = QComboBox()
         for value in PaymentMethod.ALL:
@@ -497,22 +530,75 @@ class ManualRideDialog(BaseDialog):
         hint.setWordWrap(True)
         self.add_widget(hint)
 
+        self.route_combo.currentIndexChanged.connect(self._on_route_changed)
+
         self.finish("Добавить")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
 
+    def _fill_routes(self) -> None:
+        """Направления, внутри — шаблоны и пункт «без шаблона» (TRIP-02)."""
+        for direction in Direction.ALL:
+            caption = Direction.label(direction)
+            self.route_combo.addItem(f"{caption} · без шаблона", (direction, None))
+            for template in self.service.available_templates(direction):
+                legs = ", ".join(
+                    f"{TransportType.label(leg.mode)} {leg.vehicle}"
+                    for leg in template.legs
+                )
+                self.route_combo.addItem(
+                    f"{caption} · {template.name} ({legs})", (direction, template.id)
+                )
+
+    def _on_route_changed(self) -> None:
+        """Подставить способ оплаты из первого рейса шаблона."""
+        template_id = self.selected_template_id
+        if template_id is None:
+            return
+        template = self.service.templates.by_id(template_id)
+        if template is None or not template.legs:
+            return
+        index = self.payment_combo.findData(template.legs[0].payment_method)
+        if index >= 0:
+            self.payment_combo.setCurrentIndex(index)
+
+    @property
+    def selected_direction(self) -> str:
+        data = self.route_combo.currentData()
+        return data[0] if data else Direction.HOME_TO_COLLEGE
+
+    @property
+    def selected_template_id(self) -> int | None:
+        data = self.route_combo.currentData()
+        return data[1] if data else None
+
+    def _selected_leg(self) -> tuple[str, str]:
+        """Тип транспорта и номер рейса: из шаблона либо по способу оплаты."""
+        template_id = self.selected_template_id
+        if template_id is not None:
+            template = self.service.templates.by_id(template_id)
+            if template is not None and template.legs:
+                leg = template.legs[0]
+                return leg.mode, leg.vehicle
+        if self.payment_combo.currentData() == PaymentMethod.TRAIN_STUDENT:
+            return TransportType.TRAIN, "Электричка"
+        return TransportType.BUS, "Автобус"
+
     def apply(self) -> bool:
         payment = self.payment_combo.currentData()
-        transport_type = (
-            TransportType.TRAIN if payment == PaymentMethod.TRAIN_STUDENT
-            else TransportType.BUS
-        )
-        vehicle = "Электричка" if transport_type == TransportType.TRAIN else "Автобус"
+        transport_type, vehicle = self._selected_leg()
+        # RT-17: электричка оплачивается только студенческим билетом.
+        if transport_type == TransportType.TRAIN:
+            payment = PaymentMethod.TRAIN_STUDENT
+            index = self.payment_combo.findData(payment)
+            if index >= 0:
+                self.payment_combo.setCurrentIndex(index)
         self.service.add_manual_ride(
             _to_date(self.date_edit),
-            direction=self.direction_combo.currentData(),
+            direction=self.selected_direction,
             transport_type=transport_type,
             vehicle=vehicle,
             payment_method=payment,
+            template_id=self.selected_template_id,
         )
         return True
 

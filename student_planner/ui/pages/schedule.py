@@ -454,7 +454,7 @@ class SchedulePage(QWidget):
             "Изменения ссылаются на занятия, которых больше нет в сетке:\n"
             + "\n".join(warnings)
         )
-        self.warning.add_action("Удалить оверрайд", self._delete_orphans)
+        self.warning.add_action("Удалить изменение", self._delete_orphans)
         self.warning.show()
 
     # ------------------------------------------------------------------ действия
@@ -470,9 +470,16 @@ class SchedulePage(QWidget):
 
     def replace_lesson(self, day: date, profile_id: int, slot_no: int) -> None:
         lesson = self._find_lesson(day, profile_id, slot_no)
+        caption = lesson.subject_name if lesson else f"блок {slot_no}"
+        # OVR-01/OVR-02: пара, добавленная оверрайдом ``add``, живёт только в
+        # этой дате — в сетке её нет. Замена создала бы ``replace`` на пустом
+        # слоте, и ALG-10 тут же сочла бы его сиротским. Правим сам ``add``.
+        override_id = None
+        if lesson is not None and lesson.status == LessonStatus.ADDED:
+            override_id = lesson.override_id
         dialog = ReplaceLessonDialog(
-            self.db, day, profile_id, slot_no,
-            lesson.subject_name if lesson else f"блок {slot_no}", self,
+            self.db, day, profile_id, slot_no, caption, self,
+            override_id=override_id,
         )
         if dialog.exec():
             self.changed.emit()
@@ -547,7 +554,7 @@ class SchedulePage(QWidget):
 
     def _delete_orphans(self) -> None:
         removed = OverrideService(self.db).delete_orphans()
-        self._message(f"Удалено сиротских изменений: {len(removed)}.")
+        self._message(f"Удалено изменений: {len(removed)}.")
         self.changed.emit()
         self.refresh()
 

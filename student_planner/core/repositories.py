@@ -1124,6 +1124,18 @@ class ScheduleOverrideRepository:
                     "Нельзя добавить занятие в занятый блок: выберите свободный слот или "
                     "пользуйтесь заменой (OVR-08)."
                 )
+            # Второй add на тот же блок дал бы две пары в одном слоте: одна
+            # показывалась бы, вторая висела бы скрытым дублем.
+            existing_add = self.db.fetchone(
+                "SELECT id FROM schedule_overrides WHERE date = ? AND profile_id = ? "
+                "AND slot_no = ? AND group_mark IS NULL AND override_type = 'add'",
+                (dt.to_iso(day), profile_id, slot_no),
+            )
+            if existing_add is not None:
+                raise RuleViolationError(
+                    f"На {dt.format_display(day)} в этом блоке уже есть добавленное "
+                    "занятие: измените его или выберите другой блок (OVR-08)."
+                )
         with self.db.transaction() as conn:
             cursor = conn.execute(
                 "INSERT INTO schedule_overrides(date, profile_id, slot_no, group_mark, part_seq, "

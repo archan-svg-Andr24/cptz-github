@@ -33,6 +33,7 @@ from .models import (
     WeekType,
 )
 from .repositories import (
+    _UNSET,
     BellRepository,
     ScheduleOverrideRepository,
     ScheduleTemplateRepository,
@@ -362,10 +363,37 @@ class OverrideService:
         *,
         comment: str | None = None,
     ) -> ScheduleOverride:
-        """OVR-04: блок помечается отменённым, остальные не смещаются."""
+        """OVR-04: блок помечается отменённым, остальные не смещаются.
+
+        Если блок существует только благодаря ``add`` (в сетке пусто), отмена
+        означает **удаление этой пары**. Иначе создавался бы ``cancel`` без
+        занятия в сетке: ALG-10 считает его сиротским, показывается
+        предупреждение, а повторная отмена упирается в OVR-08 — пользователь
+        попадал в замкнутый круг.
+        """
         subject_id = self.templates.subject_at(
             profile_id, self.week_type_of(value), slot_no
         )
+        if subject_id is None:
+            existing = self.overrides.for_date(value, profile_id=profile_id)
+            added = [
+                item for item in existing
+                if item.slot_no == slot_no and item.override_type == OverrideType.ADD
+            ]
+            if added:
+                # Убираем и саму добавленную пару, и осиротевшие cancel/replace
+                # этого блока: без занятия в сетке они не имеют смысла.
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "DELETE FROM schedule_overrides WHERE date = ? AND profile_id = ? "
+                        "AND slot_no = ?",
+                        (to_iso(value), profile_id, slot_no),
+                    )
+                log.info(
+                    "Удалена добавленная пара %s, блок %s (OVR-04)",
+                    to_iso(value), slot_no,
+                )
+                return added[-1]
         return self.overrides.create(
             value, profile_id, slot_no, OverrideType.CANCEL,
             subject_id=subject_id, comment=comment,
@@ -425,15 +453,21 @@ class OverrideService:
         custom_end: str | None = None,
         comment: str | None = None,
     ) -> ScheduleOverride:
-        """Правка подробностей; тип оверрайда не меняется (OVR-08)."""
+        """Правка подробностей; тип оверрайда не меняется (OVR-08).
+
+        ``ScheduleOverrideRepository.update`` принимает изменения только через
+        ``new_*``-аргументы: одноимённые ``subject_id``/``teacher``/``room``
+        оставлены для обратной совместимости и игнорируются. Передаём именно
+        ``new_*``, иначе правка молча не сохранялась.
+        """
         return self.overrides.update(
             override_id,
-            subject_id=subject_id,
-            teacher=teacher,
-            room=room,
-            custom_start=custom_start,
-            custom_end=custom_end,
-            comment=comment,
+            new_subject_id=subject_id if subject_id is not None else _UNSET,
+            new_teacher=teacher if teacher is not None else _UNSET,
+            new_room=room if room is not None else _UNSET,
+            new_custom_start=custom_start if custom_start is not None else _UNSET,
+            new_custom_end=custom_end if custom_end is not None else _UNSET,
+            new_comment=comment if comment is not None else _UNSET,
         )
 
     def delete(self, override_id: int) -> None:

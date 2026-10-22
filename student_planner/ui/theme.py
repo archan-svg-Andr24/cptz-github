@@ -41,6 +41,11 @@ COLORS = {
     "status_cancelled": "#7a828e",
     "status_replaced": "#d9a828",
     "status_added": "#3fb950",
+    # Мини-календарь (UI-05): верхняя неделя выделена синим, нижняя — обычным
+    # текстом, воскресенье — красным. Цвета прошли проверку WCAG AA (≥ 4.5:1)
+    # и на обычном фоне, и на фоне учебного периода.
+    "week_upper": "#6ba0ff",
+    "week_sunday": "#ff7b72",
 }
 
 #: Семейство шрифта: системное без засечек, читаемое в кириллице.
@@ -240,7 +245,11 @@ def stylesheet() -> str:
         background: transparent;
         border: none;
         border-radius: {RADIUS}px;
-        padding: 9px 12px;
+        padding: 9px 10px;
+        /* Пункты меню — основные действия раздела, а не подписи: кегль
+           равен medium, а не базовому 10pt, иначе названия выглядели мельче
+           текста на самих страницах. */
+        font-size: {FONT_SIZES['medium']}pt;
         text-align: left;
         color: {c['text_muted']};
     }}

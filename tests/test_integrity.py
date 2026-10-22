@@ -117,6 +117,35 @@ def test_acc_m_69_reopen_existing_database_does_not_reseed(tmp_path: Path) -> No
         db.close()
 
 
+def test_acc_m_106_is_first_run_false_on_second_start(tmp_path: Path) -> None:
+    """ACC-M-106 / FIRST-16, FIRST-04: повторный запуск не повторяет мастер.
+
+    Шаг FIRST-16 (ввод расписания) выполняется только при `is_first_run = True`,
+    а он выставляется лишь при создании файла. Проверяется, что после отказа
+    кнопкой «По умолчанию» шаблон не изменился, а второй запуск даёт
+    `is_first_run = False` и потому диалог не открывается.
+    """
+    path = tmp_path / "planner.db"
+
+    first = initialize_database(path)
+    assert first.is_first_run is True, "FIRST-01: первый запуск помечен как первый"
+
+    db = open_database(path)
+    try:
+        before = db.scalar("SELECT COUNT(*) FROM schedule_templates")
+        # Путь «По умолчанию» (FIRST-16) не меняет ни одной строки шаблона.
+        assert before == 32, f"А.7 п. 2: ожидалось 32 строки шаблона, получено {before}"
+    finally:
+        db.close()
+
+    second = initialize_database(path)
+    assert second.created is False
+    assert second.is_first_run is False, (
+        "FIRST-16/FIRST-04: второй запуск не должен считаться первым — "
+        "иначе мастер и вопрос про расписание повторятся"
+    )
+
+
 def test_first_run_writes_schema_version_setting(tmp_path: Path) -> None:
     path = tmp_path / "planner.db"
     initialize_database(path)

@@ -46,8 +46,14 @@ class NavPanel(QFrame):
     def __init__(self, db, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("NavPanel")
-        self.setFixedWidth(250)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        # UI-04: ширину задаёт пользователь, потянув разделитель. Жёсткий
+        # setFixedWidth делал min == max, и сплиттер не мог изменить размер.
+        # Минимум 250 px — предел самого QCalendarWidget: его навигационная
+        # строка (месяц + год) требует 228 px и не сжимается, поэтому ниже
+        # календарь начал бы обрезаться справа.
+        self.setMinimumWidth(250)
+        self.setMaximumWidth(560)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.db = db
         self.settings = SettingsService(db)
 
@@ -85,6 +91,13 @@ class NavPanel(QFrame):
             button = QPushButton(caption)
             button.setObjectName("NavItem")
             button.setCheckable(True)
+            # При узкой панели длинное название («Расходы на транспорт»)
+            # переносится на вторую строку, а не обрезается. Исходный текст
+            # храним в свойстве: перенос пересчитывается при каждом ресайзе.
+            button.setProperty("full_caption", caption)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum
+            )
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _checked=False, page=key: self._on_nav(page))
             self._group.addButton(button)
@@ -119,6 +132,46 @@ class NavPanel(QFrame):
         self.refresh()
 
     # ------------------------------------------------------------------ данные
+    def resizeEvent(self, event) -> None:
+        """UI-04: перенос длинных названий при узкой панели.
+
+        «Расходы на транспорт» при кегле medium требует 300 px. Когда панель
+        сужена, название переносится на две строки — так его видно целиком,
+        и ширину можно уменьшить без потери читаемости.
+        """
+        super().resizeEvent(event)
+        self._rewrap_captions()
+
+    def _rewrap_captions(self) -> None:
+        """Пересчитать перенос названий под текущую ширину кнопок."""
+        for button in self._buttons.values():
+            full = button.property("full_caption") or button.text()
+            available = button.width() - 24  # padding 12 px с каждой стороны
+            if available <= 0:
+                continue
+            metrics = button.fontMetrics()
+            if metrics.horizontalAdvance(full) <= available:
+                button.setText(full)
+                button.setToolTip("")
+                continue
+            # Переносим по словам в две строки.
+            words = full.split()
+            if len(words) < 2:
+                button.setText(full)
+                continue
+            best = None
+            for split in range(1, len(words)):
+                first = " ".join(words[:split])
+                second = " ".join(words[split:])
+                width = max(
+                    metrics.horizontalAdvance(first),
+                    metrics.horizontalAdvance(second),
+                )
+                if best is None or width < best[0]:
+                    best = (width, f"{first}\n{second}")
+            button.setText(best[1])
+            button.setToolTip(full)
+
     def refresh(self) -> None:
         """Перечитать профиль и текущую дату (§30: значения только из реестра)."""
         name, group = self.settings.profile_caption()
@@ -147,8 +200,21 @@ class NavPanel(QFrame):
     def set_week_types(self, types: dict[date, str]) -> None:
         self.calendar.set_week_types(types)
 
+    def set_type_resolver(self, resolver) -> None:
+        """UI-05: календарь сам считает тип недели для любого месяца."""
+        self.calendar.set_type_resolver(resolver)
+
     def set_selected_date(self, value: date) -> None:
         self.calendar.set_selected(value)
+
+    def shown_month(self) -> tuple[int, int]:
+        """UI-05: месяц, показанный в календаре (может отличаться от текущего)."""
+        return self.calendar.shown_month()
+
+    @property
+    def month_changed(self):
+        """UI-05: сигнал смены месяца, чтобы пересчитать метки."""
+        return self.calendar.month_changed
 
     def set_current_page(self, page: str) -> None:
         button = self._buttons.get(page)

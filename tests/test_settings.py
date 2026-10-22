@@ -83,9 +83,10 @@ def test_visible_sections_non_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ACC-M-73 — «не задано» хранится пустой строкой; 'NULL' и '0000-00-00' — ошибка.
+# §30 правила — представление «не задано»: пустая строка; 'NULL' и '0000-00-00'
+# отклоняются валидацией (DATA-21, FARE-12).
 # ---------------------------------------------------------------------------
-def test_acc_m_73_empty_string_means_not_set(db) -> None:
+def test_settings_empty_string_means_not_set(db) -> None:
     service = SettingsService(db)
     service.set(SettingsKeys.STRELKA_PERIOD_ANCHOR_DATE, "")
     assert service.raw(SettingsKeys.STRELKA_PERIOD_ANCHOR_DATE) == ""
@@ -93,7 +94,7 @@ def test_acc_m_73_empty_string_means_not_set(db) -> None:
 
 
 @pytest.mark.parametrize("bad", ["NULL", "0000-00-00", "None", "null"])
-def test_acc_m_73_invalid_absent_representations_rejected(db, bad: str) -> None:
+def test_settings_invalid_absent_representations_rejected(db, bad: str) -> None:
     service = SettingsService(db)
     with pytest.raises(SettingsError):
         service.set(SettingsKeys.STRELKA_PERIOD_ANCHOR_DATE, bad)

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -70,10 +71,19 @@ class MainWindow(QMainWindow):
         self.nav = NavPanel(db)
         self.nav.page_requested.connect(self.open_page)
         self.nav.date_selected.connect(self.on_date_selected)
+        # UI-05: при листании месяца пересчитываем точки-метки для нового
+        # месяца, иначе они остаются от предыдущего.
+        self.nav.month_changed.connect(self._refresh_calendar_marks)
         splitter.addWidget(self.nav)
 
         # ------------------------------------------------------- рабочая зона
         self.stack = QStackedWidget()
+        # Страницы содержат длинные подписи и таблицы, поэтому их
+        # minimumSizeHint (до 1000 px) распирал сплиттер: ручку нельзя было
+        # сдвинуть влево, календарь оставался обрезанным. Сжимаемость важнее
+        # «естественного» минимума — содержимое переносится и прокручивается.
+        self.stack.setMinimumWidth(360)
+        self.stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         splitter.addWidget(self.stack)
 
         # ---------------------------------------------------------- виджеты
@@ -86,7 +96,9 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([250, 850, 300])
+        # Ширина колонок: левая вмещает мини-календарь целиком (258 px),
+        # правая — виджеты; обе регулируются пользователем.
+        splitter.setSizes([312, 808, 280])
 
         self.setStatusBar(QStatusBar())
         self.status_label = QLabel("Готово")
@@ -97,6 +109,12 @@ class MainWindow(QMainWindow):
 
         self._build_pages()
         self._install_shortcuts()
+        # UI-05: метки и типы недель нужны сразу на старте. Без этого
+        # календарь оставался без подсветки до первой правки данных —
+        # любое действие вызывало refresh_all, и только тогда цвета
+        # появлялись, что выглядело как «подсветка включается после
+        # добавления пары».
+        self._refresh_calendar_marks()
         self.open_page("schedule")
 
         # UI-07: часы в правой панели тикают раз в секунду; здесь только
@@ -209,8 +227,9 @@ class MainWindow(QMainWindow):
     def _refresh_calendar_marks(self) -> None:
         """UI-05: точки-метки мини-календаря."""
         try:
-            today = clock.today()
-            start = today.replace(day=1)
+            # Метки нужны для месяца, который календарь показывает сейчас,
+            # а не для текущего: иначе после листания точки пропадали.
+            shown_year, shown_month = self.nav.calendar.shown_month()
             overrides = OverrideService(self.db)
             transport = TransportService(self.db)
             calendar = CalendarService(self.db)
@@ -232,8 +251,12 @@ class MainWindow(QMainWindow):
             self.nav.set_marks({key: " ".join(value) for key, value in marks.items()})
 
             resolver = DayResolver(self.db)
+            # Календарь получает разделитель и считает тип недели сам: при
+            # листании месяца подсветка больше не пропадает, а дни сетки по
+            # краям (соседние месяцы) тоже подсвечены.
+            self.nav.set_type_resolver(resolver)
             types: dict[date, str] = {}
-            for value in _month_dates(start):
+            for value in _grid_dates(shown_year, shown_month):
                 types[value] = resolver.week_type(value) or ""
             self.nav.set_week_types(types)
             self.nav.set_week_type(resolver.week_type(self._selected_date))
@@ -275,6 +298,22 @@ def _month_dates(value: date) -> list[date]:
         date(value.year, value.month, day)
         for day in range(1, last_day + 1)
     ]
+
+
+def _grid_dates(year: int, month: int) -> list[date]:
+    """Даты, которые реально видны в сетке месяца, включая края.
+
+    Сетка ``QCalendarWidget`` начинается с понедельника недели, содержащей
+    первое число, и заканчивается воскресеньем недели с последним числом.
+    Без этих дней подсветка типа недели обрывалась на границах месяца.
+    """
+    from calendar import monthrange
+
+    first = date(year, month, 1)
+    last = date(year, month, monthrange(year, month)[1])
+    start = first.toordinal() - first.weekday()
+    end = last.toordinal() + (6 - last.weekday())
+    return [date.fromordinal(value) for value in range(start, end + 1)]
 
 
 __all__ = ["MainWindow"]

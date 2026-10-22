@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QSpinBox,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -37,6 +37,24 @@ from ...core.trip_service import TripPlanService
 from ..dialogs import BaseDialog, ConfirmTripsDialog, ManualRideDialog
 from ..theme import COLORS
 from ..widgets import Badge, Card, EmptyState, MetricRow, SectionHeader, Separator
+
+
+def _make_compact(combo: QComboBox) -> None:
+    """Не дать длинной подписи распирать комбобокс (и всю раскладку).
+
+    ``QComboBox`` по умолчанию просит ширину самой длинной строки: шаблон с
+    четырьмя рейсами занимал 820 px и через ``minimumSizeHint`` страницы
+    блокировал ``QSplitter`` — панель с календарём нельзя было расширить.
+    """
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    combo.setMinimumContentsLength(12)
+    combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+
+def _apply_combo_tooltip(combo: QComboBox) -> None:
+    """Полное название шаблона — в подсказке, чтобы его не терять."""
+    text = combo.currentText()
+    combo.setToolTip(text if text and text != "— не выбрано —" else "")
 
 
 class TemplatesTab(QWidget):
@@ -61,8 +79,12 @@ class TemplatesTab(QWidget):
             QHeaderView.ResizeMode.Stretch
         )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # Двойной клик по строке — самый ожидаемый способ начать правку.
+        self.table.doubleClicked.connect(lambda _index: self.edit_template())
         layout.addWidget(self.table, 1)
 
+        # Действия разбиты на две строки: в одну они требуют 1180 px и
+        # распирают центральную область (UI-02).
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
 
@@ -71,21 +93,36 @@ class TemplatesTab(QWidget):
         self.add_button.clicked.connect(self.create_template)
         buttons.addWidget(self.add_button)
 
+        self.edit_button = QPushButton("Изменить")
+        self.edit_button.setToolTip("Изменить название, направление и рейсы шаблона")
+        self.edit_button.clicked.connect(self.edit_template)
+        buttons.addWidget(self.edit_button)
+
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        buttons2 = QHBoxLayout()
+        buttons2.setSpacing(8)
+
         self.toggle_button = QPushButton("Включить / отключить")
         self.toggle_button.clicked.connect(self.toggle_active)
-        buttons.addWidget(self.toggle_button)
+        buttons2.addWidget(self.toggle_button)
 
         self.delete_button = QPushButton("Удалить")
         self.delete_button.setObjectName("Danger")
         self.delete_button.clicked.connect(self.delete_template)
-        buttons.addWidget(self.delete_button)
+        buttons2.addWidget(self.delete_button)
 
-        buttons.addStretch(1)
+        buttons2.addStretch(1)
+        layout.addLayout(buttons2)
 
+        restore_row = QHBoxLayout()
+        restore_row.setSpacing(8)
+        restore_row.addStretch(1)
         self.restore_button = QPushButton("Восстановить стартовый набор")
         self.restore_button.clicked.connect(self.restore_seed)
-        buttons.addWidget(self.restore_button)
-        layout.addLayout(buttons)
+        restore_row.addWidget(self.restore_button)
+        layout.addLayout(restore_row)
 
         self.empty = EmptyState(
             "Шаблонов нет",
@@ -132,6 +169,17 @@ class TemplatesTab(QWidget):
 
     def create_template(self) -> None:
         dialog = TemplateDialog(self.db, self)
+        if dialog.exec():
+            self.changed.emit()
+            self.refresh()
+
+    def edit_template(self) -> None:
+        """RT-13: правка уже созданного шаблона."""
+        template_id = self._selected_id()
+        if template_id is None:
+            self._message("Выберите шаблон для изменения.")
+            return
+        dialog = TemplateDialog(self.db, self, template_id=template_id)
         if dialog.exec():
             self.changed.emit()
             self.refresh()
@@ -189,13 +237,149 @@ class TemplatesTab(QWidget):
         QMessageBox.information(self, "Поездки", text)
 
 
-class TemplateDialog(BaseDialog):
-    """Создание шаблона поездки (TRIP-01, TRIP-02)."""
+class TripLegRow(QWidget):
+    """Один рейс шаблона: тип транспорта, номер, способ оплаты (RT-02, RT-03).
 
-    def __init__(self, db, parent: QWidget | None = None) -> None:
-        super().__init__(parent, "Новый шаблон поездки")
+    Смешанный маршрут «Электричка + №22» — штатный случай (TRIP-01, RT-01,
+    Прил. А.4), поэтому рейс задаётся отдельной строкой, а не одним типом на
+    весь шаблон.
+    """
+
+    changed = Signal()
+
+    def __init__(self, seq: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.seq_label = QLabel(str(seq))
+        self.seq_label.setObjectName("Muted")
+        self.seq_label.setFixedWidth(16)
+        layout.addWidget(self.seq_label)
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Автобус", TransportType.BUS)
+        self.mode_combo.addItem("Электричка", TransportType.TRAIN)
+        self.mode_combo.setMinimumWidth(120)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        layout.addWidget(self.mode_combo)
+
+        self.vehicle_edit = QLineEdit()
+        self.vehicle_edit.setPlaceholderText("номер или название")
+        self.vehicle_edit.setMinimumWidth(120)
+        self.vehicle_edit.textChanged.connect(self.changed)
+        layout.addWidget(self.vehicle_edit, 1)
+
+        self.payment_combo = QComboBox()
+        self.payment_combo.setMinimumWidth(150)
+        layout.addWidget(self.payment_combo)
+
+        self.remove_button = QPushButton("✕")
+        self.remove_button.setObjectName("Flat")
+        self.remove_button.setFixedWidth(30)
+        self.remove_button.setToolTip("Убрать рейс")
+        layout.addWidget(self.remove_button)
+
+        self._fill_payments()
+
+    def set_seq(self, seq: int) -> None:
+        self.seq_label.setText(str(seq))
+
+    def set_values(
+        self,
+        *,
+        mode: str,
+        vehicle: str,
+        payment_method: str,
+    ) -> None:
+        """Заполнить рейс готовыми значениями (режим правки шаблона)."""
+        index = self.mode_combo.findData(mode)
+        if index >= 0:
+            self.mode_combo.setCurrentIndex(index)
+        # Режим мог смениться — список оплат перестроится, и способ оплаты
+        # нужно выставить уже после этого.
+        self._fill_payments()
+        pay_index = self.payment_combo.findData(payment_method)
+        if pay_index >= 0:
+            self.payment_combo.setCurrentIndex(pay_index)
+        self.vehicle_edit.setText(vehicle)
+
+    def _fill_payments(self) -> None:
+        """RT-17: электричка оплачивается только студенческим билетом."""
+        is_train = self.mode_combo.currentData() == TransportType.TRAIN
+        previous = self.payment_combo.currentData()
+        self.payment_combo.clear()
+        if is_train:
+            self.payment_combo.addItem("Студенческий билет",
+                                       PaymentMethod.TRAIN_STUDENT)
+            self.payment_combo.setEnabled(False)
+        else:
+            self.payment_combo.addItem("Стрелка", PaymentMethod.STRELKA)
+            self.payment_combo.addItem("Дебетовая карта", PaymentMethod.DEBIT_CARD)
+            self.payment_combo.setEnabled(True)
+            if previous in (PaymentMethod.STRELKA, PaymentMethod.DEBIT_CARD):
+                index = self.payment_combo.findData(previous)
+                if index >= 0:
+                    self.payment_combo.setCurrentIndex(index)
+
+    def _on_mode_changed(self) -> None:
+        self._fill_payments()
+        self.changed.emit()
+
+    # ------------------------------------------------------------------ данные
+    @property
+    def mode(self) -> str:
+        return self.mode_combo.currentData()
+
+    @property
+    def vehicle(self) -> str:
+        return self.vehicle_edit.text().strip()
+
+    @property
+    def payment_method(self) -> str:
+        return self.payment_combo.currentData()
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "mode": self.mode,
+            "vehicle": self.vehicle,
+            "payment_method": self.payment_method,
+        }
+
+
+class TemplateDialog(BaseDialog):
+    """Создание и редактирование шаблона поездки (TRIP-01, TRIP-02, RT-01…RT-04).
+
+    ``template_id`` переводит диалог в режим правки: поля заполняются текущими
+    значениями шаблона, кнопка называется «Сохранить», а ``apply`` вызывает
+    ``templates.update`` вместо ``create`` (RT-13).
+    """
+
+    MAX_LEGS = 4
+
+    def __init__(
+        self,
+        db,
+        parent: QWidget | None = None,
+        *,
+        template_id: int | None = None,
+    ) -> None:
+        self._template_id = template_id
+        self._existing = (
+            TripPlanService(db).templates.require(template_id)
+            if template_id is not None
+            else None
+        )
+        caption = (
+            f"Шаблон поездки «{self._existing.name}»"
+            if self._existing is not None
+            else "Новый шаблон поездки"
+        )
+        super().__init__(parent, caption)
         self.db = db
         self._error_label = self.error_label()
+        self._legs: list[TripLegRow] = []
 
         form = QFormLayout()
         form.setSpacing(8)
@@ -208,71 +392,128 @@ class TemplateDialog(BaseDialog):
         for value in Direction.ALL:
             self.direction_combo.addItem(Direction.label(value), value)
         form.addRow("Направление:", self.direction_combo)
-
-        self.legs_spin = QSpinBox()
-        self.legs_spin.setRange(1, 4)
-        self.legs_spin.setValue(1)
-        form.addRow("Рейсов:", self.legs_spin)
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Автобус", TransportType.BUS)
-        self.mode_combo.addItem("Электричка", TransportType.TRAIN)
-        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        form.addRow("Транспорт:", self.mode_combo)
-
-        self.vehicle_edit = QLineEdit("22")
-        form.addRow("Номер рейса:", self.vehicle_edit)
-
-        self.payment_combo = QComboBox()
-        self.payment_combo.addItem("Стрелка", PaymentMethod.STRELKA)
-        self.payment_combo.addItem("Дебетовая карта", PaymentMethod.DEBIT_CARD)
-        form.addRow("Оплата:", self.payment_combo)
         self.add_form(form)
 
+        # ------------------------------------------------------------ рейсы
+        legs_caption = QLabel("Рейсы маршрута:")
+        legs_caption.setObjectName("Small")
+        self.add_widget(legs_caption)
+
+        self.legs_host = QWidget()
+        self.legs_layout = QVBoxLayout(self.legs_host)
+        self.legs_layout.setContentsMargins(0, 0, 0, 0)
+        self.legs_layout.setSpacing(6)
+        self.add_widget(self.legs_host)
+
+        self.add_button = QPushButton("Добавить рейс")
+        self.add_button.setObjectName("Flat")
+        self.add_button.clicked.connect(self.add_leg)
+        self.add_widget(self.add_button)
+
         hint = QLabel(
+            "Рейсы выполняются по порядку: 1 — первый, 2 — пересадка. "
             "Справочные времена рейсов необязательны и на стоимость не влияют (RT-12)."
         )
         hint.setObjectName("Small")
         hint.setWordWrap(True)
         self.add_widget(hint)
 
-        self.finish("Создать")
+        self.finish("Сохранить" if self._existing is not None else "Создать")
 
-    def _on_mode_changed(self) -> None:
-        """RT-17: электричка оплачивается только студенческим билетом."""
-        is_train = self.mode_combo.currentData() == TransportType.TRAIN
-        self.payment_combo.clear()
-        if is_train:
-            self.payment_combo.addItem("Студенческий билет", PaymentMethod.TRAIN_STUDENT)
-            self.payment_combo.setEnabled(False)
+        # Заполняем поля: при правке — текущими значениями, при создании —
+        # одним автобусным рейсом со «Стрелкой».
+        if self._existing is not None:
+            self._fill_from_template(self._existing)
         else:
-            self.payment_combo.addItem("Стрелка", PaymentMethod.STRELKA)
-            self.payment_combo.addItem("Дебетовая карта", PaymentMethod.DEBIT_CARD)
-            self.payment_combo.setEnabled(True)
+            self.add_leg()
 
+    # ---------------------------------------------------------------- заполнение
+    def _fill_from_template(self, template) -> None:
+        """RT-13: показать текущие значения шаблона для правки."""
+        self.name_edit.setText(template.name)
+        index = self.direction_combo.findData(template.direction)
+        if index >= 0:
+            self.direction_combo.setCurrentIndex(index)
+        for leg in template.legs:
+            row = self.add_leg()
+            if row is None:
+                break
+            row.set_values(
+                mode=leg.mode,
+                vehicle=leg.vehicle,
+                payment_method=leg.payment_method,
+            )
+
+    # ------------------------------------------------------------------ рейсы
+    def add_leg(self) -> TripLegRow | None:
+        """Добавить строку рейса (не больше ``MAX_LEGS``)."""
+        if len(self._legs) >= self.MAX_LEGS:
+            return None
+        row = TripLegRow(len(self._legs) + 1)
+        row.remove_button.clicked.connect(lambda: self.remove_leg(row))
+        row.changed.connect(self._on_leg_changed)
+        self._legs.append(row)
+        self.legs_layout.addWidget(row)
+        self._renumber()
+        return row
+
+    def remove_leg(self, row: TripLegRow) -> None:
+        """Убрать рейс; последний рейс удалить нельзя (RT-16)."""
+        if len(self._legs) <= 1 or row not in self._legs:
+            return
+        self._legs.remove(row)
+        self.legs_layout.removeWidget(row)
+        row.setParent(None)
+        row.deleteLater()
+        self._renumber()
+
+    def _renumber(self) -> None:
+        for index, row in enumerate(self._legs, start=1):
+            row.set_seq(index)
+            # Удалять можно любой, кроме единственного.
+            row.remove_button.setEnabled(len(self._legs) > 1)
+        self.add_button.setEnabled(len(self._legs) < self.MAX_LEGS)
+
+    def _on_leg_changed(self) -> None:
+        self._error_label.clear()
+
+    def legs(self) -> list[dict[str, str]]:
+        return [row.as_dict() for row in self._legs]
+
+    # ------------------------------------------------------------------ запись
     def apply(self) -> bool:
         name = self.name_edit.text().strip()
         if not name:
             raise AppError("Укажите название шаблона (TRIP-02).")
-        vehicle = self.vehicle_edit.text().strip()
-        if not vehicle:
-            raise AppError("Укажите номер или название рейса (RT-16).")
+        legs = self.legs()
+        for index, leg in enumerate(legs, start=1):
+            if not leg["vehicle"]:
+                raise AppError(f"Укажите номер или название рейса №{index} (RT-16).")
 
-        mode = self.mode_combo.currentData()
-        payment = self.payment_combo.currentData()
-        legs = [
-            {"mode": mode, "vehicle": vehicle, "payment_method": payment}
-        ] * self.legs_spin.value()
-
-        TripPlanService(self.db).templates.create(
+        service = TripPlanService(self.db)
+        if self._template_id is not None:
+            # RT-13: правка существующего шаблона. Способ оплаты по умолчанию
+            # репозиторий выводит из новых рейсов сам (Б.13).
+            service.templates.update(
+                self._template_id,
+                name=name,
+                direction=self.direction_combo.currentData(),
+                legs=legs,
+            )
+            return True
+        service.templates.create(
             self.direction_combo.currentData(), name, legs,
-            default_payment_method=payment,
         )
         return True
 
 
 class ConfirmTab(QWidget):
-    """TRIP-08/TRIP-14: подтверждение на дату и «Проверить стоимость»."""
+    """TRIP-02/TRIP-08/TRIP-14: подтверждение на дату и «Проверить стоимость».
+
+    Шаблоны направления выбираются прямо на вкладке: пользователь видит и
+    меняет набор до подтверждения, а не только внутри диалога. Новый шаблон
+    сразу появляется в списке (TRIP-03).
+    """
 
     changed = Signal()
 
@@ -280,6 +521,7 @@ class ConfirmTab(QWidget):
         super().__init__(parent)
         self.db = db
         self._date = clock.today()
+        self._updating = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(10)
@@ -300,6 +542,37 @@ class ConfirmTab(QWidget):
         self.confirm_button.clicked.connect(self.confirm_day)
         top.addWidget(self.confirm_button)
         layout.addLayout(top)
+
+        # TRIP-02: выбор шаблона прямо на вкладке, до подтверждения.
+        selectors = QHBoxLayout()
+        selectors.setSpacing(8)
+
+        outbound_box = QVBoxLayout()
+        outbound_box.setSpacing(2)
+        outbound_caption = QLabel("Туда")
+        outbound_caption.setObjectName("Small")
+        outbound_box.addWidget(outbound_caption)
+        self.outbound_combo = QComboBox()
+        # Длинные названия шаблонов распирали комбобокс до 820 px и через
+        # раскладку блокировали сплиттер: панель с календарём нельзя было
+        # расширить. Подсказка при наведении сохраняет полное имя.
+        _make_compact(self.outbound_combo)
+        self.outbound_combo.currentIndexChanged.connect(self._on_template_changed)
+        outbound_box.addWidget(self.outbound_combo)
+        selectors.addLayout(outbound_box, 1)
+
+        return_box = QVBoxLayout()
+        return_box.setSpacing(2)
+        return_caption = QLabel("Обратно")
+        return_caption.setObjectName("Small")
+        return_box.addWidget(return_caption)
+        self.return_combo = QComboBox()
+        _make_compact(self.return_combo)
+        self.return_combo.currentIndexChanged.connect(self._on_template_changed)
+        return_box.addWidget(self.return_combo)
+        selectors.addLayout(return_box, 1)
+
+        layout.addLayout(selectors)
 
         self.card = Card("Расчёт")
         self.outbound_row = MetricRow("Туда")
@@ -338,10 +611,58 @@ class ConfirmTab(QWidget):
         self._date = value
         self.refresh()
 
+    def _fill_combo(self, combo: QComboBox, direction: str, selected_id) -> None:
+        """Заполнить список шаблонами направления (TRIP-03)."""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("— не выбрано —", None)
+        for template in TripPlanService(self.db).available_templates(direction):
+            legs = " → ".join(
+                f"{TransportType.label(leg.mode)} {leg.vehicle}"
+                for leg in template.legs
+            )
+            combo.addItem(f"{template.name} ({legs})", template.id)
+        if selected_id is not None:
+            index = combo.findData(selected_id)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        _apply_combo_tooltip(combo)
+        combo.blockSignals(False)
+
+    def _on_template_changed(self) -> None:
+        """Пересчитать карточку при смене шаблона (TRIP-14)."""
+        if self._updating:
+            return
+        for combo in (self.outbound_combo, self.return_combo):
+            _apply_combo_tooltip(combo)
+        self._update_card()
+
     def refresh(self) -> None:
         service = TripPlanService(self.db)
         plan = service.plan(self._date)
         self.date_label.setText(f"Дата: {format_display(self._date)}")
+
+        self._updating = True
+        self._fill_combo(
+            self.outbound_combo, Direction.HOME_TO_COLLEGE,
+            plan.outbound.id if plan.outbound else None,
+        )
+        self._fill_combo(
+            self.return_combo, Direction.COLLEGE_TO_HOME,
+            plan.return_trip.id if plan.return_trip else None,
+        )
+        self._updating = False
+
+        self._update_card()
+
+    def _update_card(self) -> None:
+        """Карточка «Расчёт» по выбранным шаблонам (TRIP-14)."""
+        service = TripPlanService(self.db)
+        plan = service.plan(
+            self._date,
+            outbound_template_id=self.outbound_combo.currentData(),
+            return_template_id=self.return_combo.currentData(),
+        )
 
         self.outbound_row.set_value(plan.outbound.name if plan.outbound else "не выбрано")
         self.return_row.set_value(
@@ -386,7 +707,12 @@ class ConfirmTab(QWidget):
             self.empty.setVisible(True)
 
     def confirm_day(self) -> None:
-        dialog = ConfirmTripsDialog(self.db, self._date, self)
+        """TRIP-08: подтвердить день с выбранными на вкладке шаблонами."""
+        dialog = ConfirmTripsDialog(
+            self.db, self._date, self,
+            outbound_template_id=self.outbound_combo.currentData(),
+            return_template_id=self.return_combo.currentData(),
+        )
         if dialog.exec():
             self.changed.emit()
             self.refresh()

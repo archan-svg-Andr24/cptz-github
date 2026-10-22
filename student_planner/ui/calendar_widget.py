@@ -29,6 +29,7 @@ class MiniCalendar(QWidget):
     """UI-05: календарь с подсветкой и точками-метками."""
 
     date_selected = Signal(object)  # date
+    month_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -60,6 +61,8 @@ class MiniCalendar(QWidget):
         )
         self.calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
         self.calendar.setMinimumHeight(190)
+        # Кегль цифр подстраивается под ширину панели (см. _fit_font).
+        self._font_size = 10.0
         self.calendar.setStyleSheet(self._style())
         self.calendar.selectionChanged.connect(self._on_selection)
         self.calendar.currentPageChanged.connect(self._on_page_changed)
@@ -72,6 +75,8 @@ class MiniCalendar(QWidget):
 
         self._marks: dict[date, str] = {}
         self._week_types: dict[date, str] = {}
+        self._type_resolver = None
+        self._base_font_size = 10.0
         self._selected = clock.today()
         self._refresh_header()
 
@@ -83,7 +88,17 @@ class MiniCalendar(QWidget):
 
     def set_week_types(self, types: dict[date, str]) -> None:
         """UI-05: тип недели в подсветке."""
-        self._week_types = dict(types)
+        self._week_types.update(types)
+        self._paint_marks()
+
+    def set_type_resolver(self, resolver) -> None:
+        """UI-05: досчитывать тип недели для любого показанного месяца.
+
+        Без этого подсветка работала только в том месяце, для которого окно
+        прислало словарь: после листания вперёд или назад все дни теряли цвет,
+        хотя тип недели для них известен.
+        """
+        self._type_resolver = resolver
         self._paint_marks()
 
     def set_selected(self, value: date) -> None:
@@ -96,33 +111,85 @@ class MiniCalendar(QWidget):
         selected = self.calendar.selectedDate()
         return date(selected.year(), selected.month(), selected.day())
 
+    def shown_month(self) -> tuple[int, int]:
+        """UI-05: месяц, который календарь показывает сейчас."""
+        return self.calendar.yearShown(), self.calendar.monthShown()
+
+    def resizeEvent(self, event) -> None:
+        """UI-05: подстроить кегль календаря под ширину панели.
+
+        ``QCalendarWidget`` не сжимается ниже ~250 px при базовом кегле:
+        сетка из 7 колонок перестаёт помещаться. Когда пользователь сужает
+        панель навигации, кегль уменьшается ступенями, чтобы все числа
+        месяца остались видны, а не обрезались справа.
+        """
+        super().resizeEvent(event)
+        self._fit_font()
+
+    def _fit_font(self) -> None:
+        """Подобрать наибольший кегль, при котором сетка помещается.
+
+        Кегль задаётся через стилевую таблицу календаря: ``setFont`` на
+        ``QCalendarWidget`` перебивается QSS, поэтому размер передаётся в
+        ``_style``.
+        """
+        available = self.calendar.width()
+        if available <= 0:
+            return
+        base = self._base_font_size
+        # Ступени от базового кегля вниз: чем уже панель, тем мельче цифры.
+        for size in (base, base - 0.5, base - 1.0, base - 1.5, base - 2.0):
+            if size < 6.5:
+                break
+            self._font_size = size
+            self.calendar.setStyleSheet(self._style())
+            self.calendar.updateGeometry()
+            if self.calendar.minimumSizeHint().width() <= available:
+                return
+        # Даже самый мелкий не помещается — оставляем последний.
+        self._font_size = max(6.5, base - 2.0)
+        self.calendar.setStyleSheet(self._style())
+
     def go_today(self) -> None:
         self.set_selected(clock.today())
         self.date_selected.emit(self.selected_date)
 
     # ------------------------------------------------------------------ отрисовка
     def _paint_marks(self) -> None:
-        weekdays = [
-            Qt.DayOfWeek.Monday, Qt.DayOfWeek.Tuesday, Qt.DayOfWeek.Wednesday,
-            Qt.DayOfWeek.Thursday, Qt.DayOfWeek.Friday, Qt.DayOfWeek.Saturday,
-            Qt.DayOfWeek.Sunday,
-        ]
-        today = clock.today()
-        for value in _month_dates(self.calendar.yearShown(), self.calendar.monthShown()):
-            fmt = QTextCharFormat()
-            kinds = [self._marks.get(value, "")]
-            base_color = COLORS["text"]
+        """UI-05: цвет дня по типу недели, фон по меткам.
 
+        Три правила, которые чинят замеченные дефекты:
+
+        1. Цвет задаётся **каждому** дню сетки, включая ведущие дни прошлого и
+           хвостовые дни следующего месяца: иначе крайние числа оставались без
+           подсветки, потому что типы недель приходили только на свой месяц.
+        2. Верхняя неделя — синяя, нижняя — обычный текст. Раньше цвет
+           считался, но воскресенье перекрывало его серым, а суббота и
+           воскресенье оставались красными от штатных форматов Qt.
+        3. Суббота — обычный цвет дня недели, воскресенье — красное всегда.
+           Красный в Qt приходит из ``weekdayTextFormat`` для Сб и Вс; его
+           нужно перебить явно, иначе суббота красная.
+        """
+        today = clock.today()
+        grid = _month_dates(self.calendar.yearShown(), self.calendar.monthShown())
+        resolved = self._resolve_types(grid)
+        for value in grid:
+            fmt = QTextCharFormat()
+            kinds = self._marks.get(value, "")
+            week_type = self._week_types.get(value) or resolved.get(value)
+
+            # Цвет текста: сначала по типу недели, затем воскресенье.
+            if week_type == "upper":
+                fmt.setForeground(QColor(COLORS["week_upper"]))
+            else:
+                fmt.setForeground(QColor(COLORS["text"]))
+            if value.weekday() == 6:
+                fmt.setForeground(QColor(COLORS["week_sunday"]))
+
+            # Фон: сегодня и учебный период важнее цвета текста.
             if value == today:
                 fmt.setBackground(QColor(COLORS["surface_high"]))
                 fmt.setFontWeight(700)
-            week_type = self._week_types.get(value)
-            if week_type == "upper":
-                fmt.setForeground(QColor(COLORS["accent_hover"]))
-            elif week_type == "lower":
-                fmt.setForeground(QColor(base_color))
-            if value.weekday() == 6:
-                fmt.setForeground(QColor(COLORS["text_muted"]))
             if "period" in kinds:
                 fmt.setBackground(QColor(COLORS["warning_bg"]))
                 fmt.setForeground(QColor(COLORS["warning_text"]))
@@ -131,7 +198,47 @@ class MiniCalendar(QWidget):
             fmt.setToolTip(self._tooltip(value))
             self.calendar.setDateTextFormat(QDate(value.year, value.month, value.day), fmt)
 
-        del weekdays  # список дней недели нужен только для читаемости выше
+        self._apply_weekday_formats()
+
+    def _apply_weekday_formats(self) -> None:
+        """UI-05: цвета заголовков и дней недели вместо красных по умолчанию.
+
+        Qt красит субботу и воскресенье в ``#ff0000`` через
+        ``weekdayTextFormat`` — стилевая таблица на это не влияет. Суббота
+        должна быть обычной, воскресенье — красным (как и его числа).
+        """
+        for day_of_week in (
+            Qt.DayOfWeek.Monday,
+            Qt.DayOfWeek.Tuesday,
+            Qt.DayOfWeek.Wednesday,
+            Qt.DayOfWeek.Thursday,
+            Qt.DayOfWeek.Friday,
+            Qt.DayOfWeek.Saturday,
+            Qt.DayOfWeek.Sunday,
+        ):
+            fmt = QTextCharFormat()
+            if day_of_week == Qt.DayOfWeek.Sunday:
+                fmt.setForeground(QColor(COLORS["week_sunday"]))
+            else:
+                fmt.setForeground(QColor(COLORS["text"]))
+            self.calendar.setWeekdayTextFormat(day_of_week, fmt)
+
+    def _resolve_types(self, values: list[date]) -> dict[date, str]:
+        """UI-05: тип недели для любой показанной даты.
+
+        Окно присылает типы только на текущий месяц, поэтому при листании
+        календаря подсветка исчезала. Разделитель дат знает тип недели для
+        любой даты — считаем на месте и не зависим от присланного словаря.
+        """
+        if self._type_resolver is None:
+            return {}
+        result: dict[date, str] = {}
+        for value in values:
+            try:
+                result[value] = self._type_resolver.week_type(value) or ""
+            except Exception:  # pragma: no cover - защита интерфейса
+                result[value] = ""
+        return result
 
     def _tooltip(self, value: date) -> str:
         from ..core.dates import WEEKDAY_NAMES
@@ -167,10 +274,12 @@ class MiniCalendar(QWidget):
     def _on_page_changed(self, year: int, month: int) -> None:
         self._refresh_header()
         self._paint_marks()
+        # Метки точек приходят из окна: при листании месяца их нужно
+        # пересчитать, иначе точки остаются от прежнего месяца.
+        self.month_changed.emit()
 
     # ------------------------------------------------------------------ стиль
-    @staticmethod
-    def _style() -> str:
+    def _style(self) -> str:
         c = COLORS
         return f"""
         QCalendarWidget QWidget {{
@@ -183,6 +292,12 @@ class MiniCalendar(QWidget):
             selection-color: {c['accent_text']};
             outline: none;
             border: none;
+            /* Компактные ячейки: без этого календарь требовал 296 px и
+               распирал панель навигации. Кегль подстраивается под ширину
+               панели, чтобы сетка 7 колонок не обрезалась. */
+            padding: 0px;
+            margin: 0px;
+            font-size: {self._font_size:.1f}pt;
         }}
         QCalendarWidget QAbstractItemView:disabled {{
             color: {c['text_disabled']};
@@ -191,8 +306,13 @@ class MiniCalendar(QWidget):
             background-color: transparent;
             color: {c['text']};
             border: none;
-            padding: 2px 6px;
-            icon-size: 14px;
+            padding: 1px 2px;
+            margin: 0px;
+            icon-size: 10px;
+            /* min-width: 0 снимает «естественный» минимум кнопок месяца и
+               года: их сумма (228 px) задавала нижний предел всей панели. */
+            min-width: 0px;
+            font-size: {self._font_size:.1f}pt;
         }}
         QCalendarWidget QToolButton:hover {{
             background-color: {c['surface_high']};
@@ -207,9 +327,14 @@ class MiniCalendar(QWidget):
             color: {c['text']};
             border: 1px solid {c['border_strong']};
             border-radius: 4px;
+            padding: 0px 2px;
+            min-width: 44px;
+            max-width: 58px;
         }}
         QCalendarWidget QWidget#qt_calendar_navigationbar {{
             background-color: {c['surface_alt']};
+            padding: 0px;
+            margin: 0px;
         }}
         """
 
