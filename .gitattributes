@@ -1,0 +1,41 @@
+# Нормализация переводов строк.
+#
+# В системе включён core.autocrlf=true, из-за чего любая синхронизация
+# рабочей папки (robocopy, копирование, распаковка) помечала файлы как
+# изменённые, хотя содержимое совпадало байт в байт. Ниже правила
+# фиксируют хранение в репозитории с LF, а в рабочей копии — как есть.
+
+* text=auto
+
+# Исходники Python и документация — всегда LF в репозитории
+*.py      text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.ini     text eol=lf
+*.spec    text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Батники Windows требуют CRLF, иначе ломаются
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# Бинарные файлы — без какой-либо нормализации
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.bmp     binary
+*.webp    binary
+*.ico     binary
+*.docx    binary
+*.xlsx    binary
+*.pptx    binary
+*.pdf     binary
+*.db      binary
+*.pyc     binary
+*.dll     binary
+*.exe     binary
