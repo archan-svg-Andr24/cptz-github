@@ -142,10 +142,14 @@ class DayResolver:
                 reason="Профиль звонков не задан",
             )
 
-        # --- Шаг 3: шаблон недели ------------------------------------------
+        # --- Шаг 3: шаблон недели на эту дату -------------------------------
+        # TPL-08: шаблон версионный, поэтому читаем версию, действующую именно
+        # на разрешаемую дату, а не «текущую».
         template = {
             cell.slot_no: cell
-            for cell in self._templates.cells(week_type or WeekType.LOWER, profile_id=profile.id)
+            for cell in self._templates.cells(
+                week_type or WeekType.LOWER, profile_id=profile.id, on_date=when
+            )
         }
         overrides = {
             item.slot_no: item for item in self._overrides.for_date(when, profile_id=profile.id)

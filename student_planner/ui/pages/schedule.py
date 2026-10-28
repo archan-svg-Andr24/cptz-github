@@ -12,6 +12,7 @@ from datetime import date
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -145,14 +146,28 @@ class LessonCard(QFrame):
             badges.addWidget(badge, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(badges)
 
-        # Действия.
+        # Действия. Набор кнопок зависит от состояния пары: показываем только
+        # осмысленные действия. Раньше «Заменить» и «Убрать изменение» висели
+        # одновременно, и блок пары вырастал с 62 до 86 px.
         actions = QVBoxLayout()
         actions.setSpacing(4)
+
+        # Изменение этой даты внесено и его можно снять (OVR-11). Для пары,
+        # добавленной оверрайдом ``add``, «Убрать» не нужно: её удаляет
+        # «Отменить» (OVR-04), иначе вышли бы две кнопки об одном и том же.
+        has_change = (
+            lesson.override_id is not None
+            and lesson.status in (LessonStatus.CANCELLED, LessonStatus.REPLACED)
+        )
+
         self.cancel_button = QPushButton("Отменить")
         self.cancel_button.setObjectName("Flat")
         self.cancel_button.clicked.connect(
             lambda: self.cancel_requested.emit(self.lesson.profile_id, self.lesson.slot_no)
         )
+        # На отменённой паре кнопка уже не нужна, на заменённой — бессмысленна:
+        # отменять нечего, пара и так изменена.
+        self.cancel_button.setVisible(not has_change)
         self.cancel_button.setEnabled(
             lesson.status in (LessonStatus.PLANNED, LessonStatus.ADDED)
         )
@@ -163,8 +178,26 @@ class LessonCard(QFrame):
         self.replace_button.clicked.connect(
             lambda: self.replace_requested.emit(self.lesson.profile_id, self.lesson.slot_no)
         )
-        self.replace_button.setEnabled(lesson.status != LessonStatus.CANCELLED)
+        # SCH-18/OVR-05: заменять можно и отменённую пару — это путь «убрал
+        # одну, поставил другую»: cancel снимается, ставится replace.
+        self.replace_button.setEnabled(True)
+        # На заменённой паре второго «Заменить» не показываем: замену снимают
+        # через «Убрать изменение», иначе кнопки дублируют друг друга.
+        self.replace_button.setVisible(lesson.status != LessonStatus.REPLACED)
         actions.addWidget(self.replace_button)
+
+        # OVR-11: «Убрать изменение» возвращает пару к состоянию расписания.
+        self.undo_button = QPushButton("↺ Убрать изменение")
+        self.undo_button.setObjectName("Danger")
+        self.undo_button.setToolTip(
+            "Снять изменение этой даты: отмена вернёт пару в расписание, "
+            "замена — предмет из сетки. Сама сетка не меняется."
+        )
+        self.undo_button.setVisible(has_change)
+        self.undo_button.clicked.connect(
+            lambda: self.reset_requested.emit(self.lesson.override_id)
+        )
+        actions.addWidget(self.undo_button)
         layout.addLayout(actions)
 
 
@@ -228,10 +261,6 @@ class SchedulePage(QWidget):
         self.grid_button.clicked.connect(self.open_grid_editor)
         self.header.add_action(self.grid_button)
 
-        self.weeks_button = QPushButton("Изменить чередование недель…")
-        self.weeks_button.clicked.connect(self.open_week_settings)
-        self.header.add_action(self.weeks_button)
-
         # ------------------------------------------------- переключатель режимов
         controls = QHBoxLayout()
         controls.setSpacing(8)
@@ -260,6 +289,16 @@ class SchedulePage(QWidget):
         self.today_button = QPushButton("Сегодня")
         self.today_button.clicked.connect(self.go_today)
         controls.addWidget(self.today_button)
+
+        # SCH-11/SCH-18: отменённые пары по умолчанию скрыты — после «Отменить»
+        # занятие должно исчезать из дня, а не оставаться зачёркнутым.
+        self.show_cancelled = QCheckBox("Показывать отменённые")
+        self.show_cancelled.setToolTip(
+            "Отменённая пара остаётся в этот день, но по умолчанию не показывается: "
+            "включите, чтобы увидеть, что именно отменено и почему (SCH-18)."
+        )
+        self.show_cancelled.toggled.connect(self._on_show_cancelled)
+        controls.addWidget(self.show_cancelled)
 
         controls.addStretch(1)
         self.week_badge_holder = QHBoxLayout()
@@ -338,6 +377,10 @@ class SchedulePage(QWidget):
         if self._mode in ("current", "next"):
             return week_dates(monday_of(self._date))
         return [self._date]
+
+    def _on_show_cancelled(self, _checked: bool) -> None:
+        """SCH-18: переключатель показа отменённых пар."""
+        self.refresh()
 
     # ------------------------------------------------------------------ отрисовка
     def refresh(self) -> None:
@@ -422,7 +465,30 @@ class SchedulePage(QWidget):
             column.body.addWidget(label)
             return column, False
 
-        for lesson in result.lessons:
+        # SCH-18: отменённые пары не занимают место в дне, пока их не попросят
+        # показать. Раньше карточка оставалась зачёркнутой, и «Отменить»
+        # выглядело как «ничего не произошло».
+        visible = [
+            lesson for lesson in result.lessons
+            if self.show_cancelled.isChecked()
+            or lesson.status != LessonStatus.CANCELLED
+        ]
+        hidden = len(result.lessons) - len(visible)
+        if hidden and not self.show_cancelled.isChecked():
+            note = QLabel(
+                f"Отменено пар: {hidden} — включите «Показывать отменённые», "
+                "чтобы увидеть (SCH-18)."
+            )
+            note.setObjectName("Small")
+            note.setWordWrap(True)
+            column.body.addWidget(note)
+        if not visible:
+            label = QLabel("Занятий нет")
+            label.setObjectName("Empty")
+            column.body.addWidget(label)
+            return column, False
+
+        for lesson in visible:
             card = LessonCard(lesson)
             card.cancel_requested.connect(
                 lambda profile_id, slot_no, value=day: self.cancel_lesson(
@@ -435,6 +501,7 @@ class SchedulePage(QWidget):
                 )
             )
             card.homework_requested.connect(self._open_homework)
+            card.reset_requested.connect(self.undo_override)
             column.body.addWidget(card)
 
         add_button = QPushButton("Добавить занятие…")
@@ -480,12 +547,15 @@ class SchedulePage(QWidget):
         dialog = ReplaceLessonDialog(
             self.db, day, profile_id, slot_no, caption, self,
             override_id=override_id,
+            subject_id=lesson.subject.id if lesson and lesson.subject else None,
         )
         if dialog.exec():
             self.changed.emit()
             self.refresh()
 
     def add_lesson(self, day: date) -> None:
+        from ...core.repositories import BellRepository
+
         result = DayResolver(self.db).resolve(day)
         if result.profile is None:
             self._message("Для этого дня нет профиля звонков (BELL-18).")
@@ -495,12 +565,47 @@ class SchedulePage(QWidget):
         if slot_no is None:
             self._message("Свободных блоков нет: все заняты (OVR-08).")
             return
+
+        # OVR-07: список всех блоков дня, чтобы выбрать любой, а не только
+        # первый свободный. Отменённые блоки помечаются как свободные.
+        by_slot = {lesson.slot_no: lesson for lesson in result.lessons}
+        slots: list[tuple[int, str, bool]] = []
+        for slot in BellRepository(self.db).profile(profile_id).slots:
+            lesson = by_slot.get(slot.slot_no)
+            free = lesson is None or lesson.status == LessonStatus.CANCELLED
+            text = slot.display_name or slot.time_caption or ""
+            slots.append((slot.slot_no, text, not free))
+
         dialog = AddLessonDialog(
-            self.db, day, profile_id, slot_no, f"блок {slot_no}", self
+            self.db, day, profile_id, slot_no, f"блок {slot_no}", self, slots=slots
         )
         if dialog.exec():
             self.changed.emit()
             self.refresh()
+
+    def undo_override(self, override_id: int) -> None:
+        """OVR-11: убрать изменение этой даты — пара возвращается к сетке.
+
+        Отмена снимается, и пара снова показывается как обычно; замена
+        снимается, и возвращается предмет из шаблона недели. Сетка не
+        меняется: TPL-08 правит только редактор сетки.
+        """
+        if override_id is None:
+            return
+        item = OverrideService(self.db).overrides.by_id(override_id)
+        if item is None:
+            self._message("Изменение уже удалено.")
+            self.refresh()
+            return
+        kind = "отмену" if str(item.override_type) == "cancel" else "замену"
+        if not self._confirm(
+            f"Убрать {kind} пары в блоке {item.slot_no} на "
+            f"{format_display(self._date)}? Пара вернётся к расписанию."
+        ):
+            return
+        OverrideService(self.db).delete(override_id)
+        self.changed.emit()
+        self.refresh()
 
     def reset_day(self) -> None:
         overrides = OverrideService(self.db)
@@ -522,13 +627,6 @@ class SchedulePage(QWidget):
             self.changed.emit()
             self.refresh()
 
-    def open_week_settings(self) -> None:
-        from ..dialogs import BaseDialog  # локальный импорт: диалог появится ниже
-
-        self._message(
-            "Чередование недель задаётся якорем в «Настройки → Недели» (WEEK-08)."
-        )
-
     # ------------------------------------------------------------------ помощь
     def _find_lesson(self, day: date, profile_id: int, slot_no: int):
         result = DayResolver(self.db).resolve(day)
@@ -538,17 +636,23 @@ class SchedulePage(QWidget):
         return None
 
     def _first_free_slot(self, day: date, profile_id: int) -> int | None:
+        """Первый свободный блок дня (OVR-07): отменённый блок тоже свободен."""
         from ...core.repositories import BellRepository
 
         profile = BellRepository(self.db).profile(profile_id)
         if profile is None:
             return None
-        occupied = {lesson.slot_no for lesson in DayResolver(self.db).resolve(day).lessons}
-        override_service = OverrideService(self.db)
+        result = DayResolver(self.db).resolve(day)
+        # SCH-18: отменённая пара в этот день не показывается, значит блок
+        # свободен — иначе «Добавить» предлагал только блок после последней
+        # пары, и вставить занятие на место отменённого было нельзя.
+        occupied = {
+            lesson.slot_no
+            for lesson in result.lessons
+            if lesson.status != LessonStatus.CANCELLED
+        }
         for slot in profile.slots:
-            if slot.slot_no in occupied:
-                continue
-            if not override_service.can_cancel(day, profile_id, slot.slot_no):
+            if slot.slot_no not in occupied:
                 return slot.slot_no
         return None
 

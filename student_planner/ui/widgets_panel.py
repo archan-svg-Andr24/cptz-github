@@ -200,17 +200,45 @@ class StrellaWidget(Card):
 
 
 class HomeworkWidget(Card):
-    """UI-10/HW-05: ближайшие задания на сегодня и завтра."""
+    """UI-10/HW-05: задания на текущую и следующую недели.
+
+    Высота списка **подбирается автоматически** по числу заданий: от 0 до
+    ``MAX_VISIBLE_ROWS`` (четырёх) строк видны целиком. Если заданий больше,
+    показываются первые четыре, а остальные доступны вертикальной прокруткой.
+    Ручной регулировки у карточки нет: граница списка всегда снизу, и список
+    не должен «уезжать» при обновлениях.
+    """
 
     open_requested = Signal()
+
+    #: Сколько строк видно без прокрутки. Пятая и далее — под прокруткой.
+    MAX_VISIBLE_ROWS = 4
 
     def __init__(self, db, parent: QWidget | None = None) -> None:
         super().__init__("Домашние задания", parent=parent)
         self.db = db
 
-        self.rows_layout = QVBoxLayout()
+        self.rows_host = QWidget()
+        self.rows_host.setMinimumWidth(0)
+        self.rows_layout = QVBoxLayout(self.rows_host)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(4)
-        self.add_layout(self.rows_layout)
+        self.rows_layout.addStretch(1)
+
+        self.rows_scroll = QScrollArea()
+        self.rows_scroll.setWidgetResizable(True)
+        self.rows_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.rows_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        # Height зависит от числа строк и считается в _fit_list_height, поэтому
+        # политика Expanding: карточка забирает ровно столько, сколько нужно.
+        self.rows_scroll.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
+        self.rows_scroll.setWidget(self.rows_host)
+        self.rows_scroll.setVisible(False)
+        self.add_widget(self.rows_scroll)
 
         self.empty_label = QLabel("Заданий нет")
         self.empty_label.setObjectName("Empty")
@@ -222,43 +250,130 @@ class HomeworkWidget(Card):
         self.open_button.clicked.connect(self.open_requested)
         self.add_widget(self.open_button)
 
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Maximum)
+
+    def _visible_rows(self) -> list[QWidget]:
+        rows: list[QWidget] = []
+        for index in range(self.rows_layout.count()):
+            widget = self.rows_layout.itemAt(index).widget()
+            if widget is not None and widget.isVisibleTo(self.rows_host):
+                rows.append(widget)
+        return rows
+
+    def _row_heights(self, width: int) -> list[int]:
+        """Высоты строк при заданной ширине.
+
+        ``sizeHint`` строки не учитывает перенос длинных названий по ширине
+        панели (отдавал 76 px вместо 96), поэтому считаем ``heightForWidth``.
+        """
+        if width <= 0:
+            width = self.rows_scroll.width() - 2 * self.rows_scroll.frameWidth()
+        heights: list[int] = []
+        for widget in self._visible_rows():
+            height = widget.heightForWidth(width) if width > 0 else -1
+            heights.append(height if height > 0 else widget.sizeHint().height())
+        return heights
+
+    def _span_height(self, heights: list[int]) -> int:
+        """Высота области под указанные строки, включая отступы и рамку."""
+        if not heights:
+            return 0
+        margins = self.rows_layout.contentsMargins()
+        total = sum(heights)
+        total += self.rows_layout.spacing() * (len(heights) - 1)
+        total += margins.top() + margins.bottom()
+        total += 2 * self.rows_scroll.frameWidth()
+        return total
+
+    def preferred_list_height(self) -> int:
+        """Высота, при которой видно не больше MAX_VISIBLE_ROWS заданий.
+
+        Больше четырёх строк не показываем даже при большом списке: остальные
+        уходят под прокрутку, и карточка не выдавливает верхние виджеты панели.
+        """
+        width = self.rows_scroll.viewport().width()
+        heights = self._row_heights(width)
+        if not heights:
+            return 0
+        limit = self.MAX_VISIBLE_ROWS
+        if len(heights) > limit:
+            # Прокрутка отнимает ширину у строк: пересчитываем по ней, иначе
+            # последняя видимая строка окажется обрезанной по высоте.
+            bar = self.rows_scroll.verticalScrollBar().sizeHint().width()
+            if bar > 0 and width > bar:
+                heights = self._row_heights(width - bar)
+        return self._span_height(heights[:limit])
+
     def refresh(self) -> None:
-        while self.rows_layout.count():
+        while self.rows_layout.count() > 1:  # последний — stretch
             item = self.rows_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # deleteLater() отложен: без hide()+setParent(None) старая
+                # строка остаётся видимой до конца цикла событий.
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         rows = HomeworkService(self.db).upcoming()
         self.empty_label.setVisible(not rows)
+        self.rows_scroll.setVisible(bool(rows))
         if not rows:
+            self._fit_list_height()
             return
 
-        for row in rows[:4]:
-            line = QWidget()
-            layout = QVBoxLayout(line)
-            layout.setContentsMargins(0, 2, 0, 2)
-            layout.setSpacing(0)
+        for row in rows:
+            self.rows_layout.insertWidget(self.rows_layout.count() - 1, self._row(row))
+        self._fit_list_height()
+        # Первый расчёт идёт до раскладки: у скрытой области ещё нет ширины,
+        # поэтому heightForWidth строк врёт. Повторяем в конце цикла событий,
+        # когда геометрия уже настоящая.
+        QTimer.singleShot(0, self._fit_list_height)
 
-            caption = QLabel(row.subject_name)
-            caption.setObjectName("Subtitle")
-            # Название предмета бывает длинным («Документирование программных
-            # средств»), а панель узкой: без переноса текст уходил за край.
-            caption.setWordWrap(True)
-            layout.addWidget(caption)
+    def _fit_list_height(self) -> None:
+        """Подогнать высоту области под видимые задания (дефект: стояла 59 px).
 
-            detail = QLabel(row.short_description or "без описания")
-            detail.setObjectName("Small")
-            detail.setToolTip(row.description)
-            detail.setWordWrap(True)
-            layout.addWidget(detail)
+        ``QScrollArea`` не выводит ``sizeHint`` из содержимого, а карточка с
+        политикой Maximum брала её один раз при первом показе — список
+        навсегда оставался высотой в одну строку, и добавленные задания
+        обрезались. Считаем нужную высоту явно после раскладки.
+        """
+        height = self.preferred_list_height()
+        if height <= 0:
+            return
+        if (self.rows_scroll.minimumHeight() != height
+                or self.rows_scroll.maximumHeight() != height):
+            # min = max: ровно по содержимому, без пустого поля снизу.
+            self.rows_scroll.setMinimumHeight(height)
+            self.rows_scroll.setMaximumHeight(height)
+            self.rows_scroll.updateGeometry()
+            self.updateGeometry()
 
-            due = QLabel(f"до {row.due_caption}")
-            due.setObjectName("Small")
-            due.setStyleSheet(f"color: {COLORS['accent_hover']};")
-            layout.addWidget(due)
+    def _row(self, row) -> QWidget:
+        line = QWidget()
+        layout = QVBoxLayout(line)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(0)
 
-            self.rows_layout.addWidget(line)
+        caption = QLabel(row.subject_name)
+        caption.setObjectName("Subtitle")
+        # Название предмета бывает длинным («Документирование программных
+        # средств»), а панель узкой: без переноса текст уходил за край.
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+
+        detail = QLabel(row.short_description or "без описания")
+        detail.setObjectName("Small")
+        detail.setToolTip(row.description)
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
+
+        due = QLabel(f"до {row.due_caption}")
+        due.setObjectName("Small")
+        due.setStyleSheet(f"color: {COLORS['accent_hover']};")
+        layout.addWidget(due)
+        return line
 
 
 class WidgetsPanel(QFrame):
@@ -298,6 +413,9 @@ class WidgetsPanel(QFrame):
         layout.setContentsMargins(12, 14, 12, 12)
         layout.setSpacing(12)
 
+        # UI-24: высоту списка заданий задаёт автоподбор (до четырёх строк,
+        # дальше прокрутка), поэтому вертикальный сплиттер не нужен: тянуть
+        # границу сверху было неудобно и не давало доступа к нижней.
         self.clock = ClockWidget()
         layout.addWidget(self.clock)
         layout.addWidget(Separator())

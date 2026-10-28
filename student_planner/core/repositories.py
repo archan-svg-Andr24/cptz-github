@@ -879,78 +879,184 @@ def _validate_parts(parts: list[tuple[str, str, str]]) -> None:
 # Шаблоны расписания (TPL-01…TPL-07, GRID-01…GRID-08)
 # ===========================================================================
 def _cell(row: Any) -> TemplateCell:
+    keys = row.keys()
     return TemplateCell(
         id=row["id"], profile_id=row["profile_id"], week_type=row["week_type"],
         slot_no=int(row["slot_no"]), subject_id=row["subject_id"], group_mark=row["group_mark"],
+        effective_from=_date(row["effective_from"]) if "effective_from" in keys else None,
     )
 
 
+#: TPL-08: дата-«дно» для версии, действующей с самого начала учёта.
+BASE_DUE_DATE = "0001-01-01"
+#: TPL-08: дата-«потолок»: при чтении без даты берётся самая поздняя версия.
+LATEST_DUE_DATE = "9999-12-31"
+
+
 class ScheduleTemplateRepository:
-    """Шаблон недели: одна строка на ``(profile_id, week_type, slot_no)`` (TPL-01)."""
+    """Шаблон недели с историей правок (TPL-01, TPL-08).
+
+    На позицию ``(profile_id, week_type, slot_no, group_mark)`` хранится не одна
+    строка, а цепочка версий по ``effective_from``. Чтение возвращает версию,
+    действующую на запрошенную дату, поэтому правка сетки перестаёт менять
+    прошлые недели. Строка с ``subject_id IS NULL`` — явная очистка
+    (надгробие): она скрывает более старое значение, но не стирает историю.
+    """
 
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def cells(self, week_type: str, *, profile_id: int | None = None) -> list[TemplateCell]:
-        if profile_id is None:
-            rows = self.db.fetchall(
-                "SELECT * FROM schedule_templates WHERE week_type = ? ORDER BY profile_id, slot_no",
-                (week_type,),
-            )
-        else:
-            rows = self.db.fetchall(
-                "SELECT * FROM schedule_templates WHERE week_type = ? AND profile_id = ? "
-                "ORDER BY slot_no",
-                (week_type, profile_id),
-            )
-        return [_cell(row) for row in rows]
+    @staticmethod
+    def _on_date(value: date | str | None) -> str:
+        if value is None:
+            return LATEST_DUE_DATE
+        return value if isinstance(value, str) else dt.to_iso(value)
 
-    def cell(self, profile_id: int, week_type: str, slot_no: int) -> TemplateCell | None:
+    def cells(
+        self,
+        week_type: str,
+        *,
+        profile_id: int | None = None,
+        on_date: date | str | None = None,
+    ) -> list[TemplateCell]:
+        """Ячейки недели, действующие на дату ``on_date`` (TPL-08)."""
+        limit = self._on_date(on_date)
+        sql = (
+            "SELECT t.* FROM schedule_templates t "
+            "WHERE t.week_type = ? AND t.effective_from <= ? "
+            "AND t.effective_from = ("
+            "  SELECT MAX(x.effective_from) FROM schedule_templates x "
+            "  WHERE x.profile_id = t.profile_id AND x.week_type = t.week_type "
+            "    AND x.slot_no = t.slot_no AND x.group_mark IS t.group_mark "
+            "    AND x.effective_from <= ?"
+            ") "
+        )
+        params: list[Any] = [week_type, limit, limit]
+        if profile_id is not None:
+            sql += "AND t.profile_id = ? "
+            params.append(profile_id)
+        sql += "ORDER BY t.profile_id, t.slot_no"
+        return [_cell(row) for row in self.db.fetchall(sql, tuple(params))]
+
+    def cell(
+        self,
+        profile_id: int,
+        week_type: str,
+        slot_no: int,
+        *,
+        on_date: date | str | None = None,
+    ) -> TemplateCell | None:
+        """Версия ячейки, действующая на дату (TPL-08)."""
         row = self.db.fetchone(
-            "SELECT * FROM schedule_templates WHERE profile_id = ? AND week_type = ? AND slot_no = ? "
-            "AND group_mark IS NULL",
-            (profile_id, week_type, slot_no),
+            "SELECT * FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
+            "AND slot_no = ? AND group_mark IS NULL AND effective_from <= ? "
+            "ORDER BY effective_from DESC LIMIT 1",
+            (profile_id, week_type, slot_no, self._on_date(on_date)),
         )
         return _cell(row) if row else None
 
-    def subject_at(self, profile_id: int, week_type: str, slot_no: int) -> int | None:
-        cell = self.cell(profile_id, week_type, slot_no)
+    def subject_at(
+        self,
+        profile_id: int,
+        week_type: str,
+        slot_no: int,
+        *,
+        on_date: date | str | None = None,
+    ) -> int | None:
+        cell = self.cell(profile_id, week_type, slot_no, on_date=on_date)
         return None if cell is None else cell.subject_id
 
+    def versions(
+        self, profile_id: int, week_type: str, slot_no: int
+    ) -> list[TemplateCell]:
+        """История позиции от старых версий к новым (TPL-08); для проверок и UI."""
+        return [
+            _cell(row)
+            for row in self.db.fetchall(
+                "SELECT * FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
+                "AND slot_no = ? AND group_mark IS NULL ORDER BY effective_from",
+                (profile_id, week_type, slot_no),
+            )
+        ]
+
     def set_cell(
-        self, profile_id: int, week_type: str, slot_no: int, subject_id: int | None
+        self,
+        profile_id: int,
+        week_type: str,
+        slot_no: int,
+        subject_id: int | None,
+        *,
+        effective_from: date | str | None = None,
     ) -> TemplateCell | None:
-        """GRID-02/DATA-20: сохранение одной ячейки атомарно; ``None`` очищает её."""
+        """GRID-02/DATA-20/TPL-08: запись ячейки, действующей с даты.
+
+        С ``effective_from`` правка создаёт новую версию: более поздние версии
+        этой позиции отбрасываются (они перекрыты), более ранние сохраняются —
+        прошлые недели остаются прежними. Без даты поведение прежнее: история
+        позиции заменяется одной базовой строкой.
+        """
         if week_type not in (WeekType.UPPER, WeekType.LOWER):
             raise ValidationError("Тип недели: только upper или lower.", field="week_type")
         if subject_id is None:
-            self.clear_cell(profile_id, week_type, slot_no)
+            self.clear_cell(profile_id, week_type, slot_no, effective_from=effective_from)
             return None
-        with self.db.transaction() as conn:
-            # TPL-01: на позицию — не более одной строки. ``ON CONFLICT`` здесь
-            # не работает: в уникальном индексе участвует ``group_mark``, а
-            # SQLite считает NULL-ы различными, поэтому конфликт не находится и
-            # вставлялся бы дубль. Обновляем существующую строку явно.
-            cursor = conn.execute(
-                "UPDATE schedule_templates SET subject_id = ? "
-                "WHERE profile_id = ? AND week_type = ? AND slot_no = ? AND group_mark IS NULL",
-                (subject_id, profile_id, week_type, slot_no),
-            )
-            if cursor.rowcount == 0:
-                conn.execute(
-                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
-                    "group_mark, subject_id) VALUES (?, ?, ?, NULL, ?)",
-                    (profile_id, week_type, slot_no, subject_id),
-                )
-        return self.cell(profile_id, week_type, slot_no)
 
-    def clear_cell(self, profile_id: int, week_type: str, slot_no: int) -> None:
-        """GRID-05: очистка удаляет только строку шаблона, слот остаётся."""
+        start = BASE_DUE_DATE if effective_from is None else self._on_date(effective_from)
         with self.db.transaction() as conn:
             conn.execute(
                 "DELETE FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                "AND slot_no = ? AND group_mark IS NULL",
-                (profile_id, week_type, slot_no),
+                "AND slot_no = ? AND group_mark IS NULL AND effective_from >= ?",
+                (profile_id, week_type, slot_no, start),
+            )
+            conn.execute(
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                "group_mark, subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                (profile_id, week_type, slot_no, subject_id, start),
+            )
+        return self.cell(profile_id, week_type, slot_no, on_date=start)
+
+    def clear_cell(
+        self,
+        profile_id: int,
+        week_type: str,
+        slot_no: int,
+        *,
+        effective_from: date | str | None = None,
+    ) -> None:
+        """GRID-05/TPL-08: очистка ячейки с даты, слот остаётся.
+
+        С датой ставится надгробие: занятия нет с этого дня, но прошлые недели
+        сохраняют прежнюю пару. Без даты строки позиции удаляются полностью.
+        """
+        if effective_from is None:
+            with self.db.transaction() as conn:
+                conn.execute(
+                    "DELETE FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
+                    "AND slot_no = ? AND group_mark IS NULL",
+                    (profile_id, week_type, slot_no),
+                )
+            return
+
+        start = self._on_date(effective_from)
+        with self.db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
+                "AND slot_no = ? AND group_mark IS NULL AND effective_from >= ?",
+                (profile_id, week_type, slot_no, start),
+            )
+            # Надгробие нужно, только если раньше было что скрывать.
+            earlier = conn.execute(
+                "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
+                "AND slot_no = ? AND group_mark IS NULL AND subject_id IS NOT NULL "
+                "AND effective_from < ? LIMIT 1",
+                (profile_id, week_type, slot_no, start),
+            ).fetchone()
+            if earlier is None:
+                return
+            conn.execute(
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                "group_mark, subject_id, effective_from) VALUES (?, ?, ?, NULL, NULL, ?)",
+                (profile_id, week_type, slot_no, start),
             )
 
     def clear_week(self, week_type: str) -> int:
@@ -959,16 +1065,37 @@ class ScheduleTemplateRepository:
             cursor = conn.execute("DELETE FROM schedule_templates WHERE week_type = ?", (week_type,))
             return int(cursor.rowcount)
 
-    def replace_week(self, week_type: str, entries: Iterable[tuple[int, int, int]]) -> int:
-        """Перезаписать неделю набором ``(profile_id, slot_no, subject_id)`` (GRID-11)."""
+    def replace_week(
+        self,
+        week_type: str,
+        entries: Iterable[tuple[int, int, int]],
+        *,
+        effective_from: date | str | None = None,
+    ) -> int:
+        """Перезаписать неделю набором ``(profile_id, slot_no, subject_id)`` (GRID-11).
+
+        С датой создаётся новая версия каждой ячейки — прошлые недели целы.
+        Без даты история недели заменяется базовыми строками.
+        """
         rows = list(entries)
+        start = BASE_DUE_DATE if effective_from is None else self._on_date(effective_from)
         with self.db.transaction() as conn:
-            conn.execute("DELETE FROM schedule_templates WHERE week_type = ?", (week_type,))
+            if effective_from is None:
+                conn.execute(
+                    "DELETE FROM schedule_templates WHERE week_type = ?", (week_type,)
+                )
+            else:
+                # Позиции, которых нет в новом наборе, тоже нужно очистить —
+                # иначе они «протекут» в новую версию недели.
+                conn.execute(
+                    "DELETE FROM schedule_templates WHERE week_type = ? AND effective_from >= ?",
+                    (week_type, start),
+                )
             for profile_id, slot_no, subject_id in rows:
                 conn.execute(
                     "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id) VALUES (?, ?, ?, NULL, ?)",
-                    (profile_id, week_type, slot_no, subject_id),
+                    "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                    (profile_id, week_type, slot_no, subject_id, start),
                 )
         return len(rows)
 
@@ -986,16 +1113,18 @@ class ScheduleTemplateRepository:
                     continue
                 conn.execute(
                     "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id) VALUES (?, ?, ?, NULL, ?)",
-                    (profile_id, week_type, slot_no, subject_id),
+                    "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                    (profile_id, week_type, slot_no, subject_id, BASE_DUE_DATE),
                 )
                 added += 1
         return added
 
-    def occupied_slots(self, profile_id: int, week_type: str) -> set[int]:
+    def occupied_slots(
+        self, profile_id: int, week_type: str, *, on_date: date | str | None = None
+    ) -> set[int]:
         return {
             cell.slot_no
-            for cell in self.cells(week_type, profile_id=profile_id)
+            for cell in self.cells(week_type, profile_id=profile_id, on_date=on_date)
             if cell.subject_id is not None
         }
 
@@ -1108,22 +1237,63 @@ class ScheduleOverrideRepository:
                 (dt.to_iso(day), profile_id, slot_no),
             )
             if existing is not None:
-                raise RuleViolationError(
-                    f"На {dt.format_display(day)} для этого блока уже есть изменение "
-                    f"«{existing['override_type']}»: допускается только одно из отмены или "
-                    "замены на дату и блок (OVR-08)."
-                )
+                if (
+                    override_type == OverrideType.REPLACE
+                    and existing["override_type"] == OverrideType.CANCEL
+                ):
+                    # OVR-05/SCH-18: замена поверх отмены того же блока — это
+                    # «убрал пару, поставил другую». Прежний cancel снимаем,
+                    # иначе правило «одно изменение на блок» блокировало путь.
+                    with self.db.transaction() as conn:
+                        conn.execute(
+                            "DELETE FROM schedule_overrides WHERE id = ?", (existing["id"],)
+                        )
+                else:
+                    raise RuleViolationError(
+                        f"На {dt.format_display(day)} для этого блока уже есть изменение "
+                        f"«{existing['override_type']}»: допускается только одно из отмены или "
+                        "замены на дату и блок (OVR-08)."
+                    )
         if override_type == OverrideType.ADD:
-            # add в занятый слот запрещён — OVR-08, TPL-01.
+            # OVR-07/OVR-08: add в занятый слот запрещён, но отменённый блок
+            # (оверрайд ``cancel`` на эту дату) считаем свободным: пара в этот
+            # день не показывается (SCH-18), значит место освободилось. Иначе
+            # цепочка «отменил пару → поставил другую» упиралась в отказ, и
+            # пользователь не мог вернуть занятие в освободившийся блок.
+            cancelled = self.db.fetchone(
+                "SELECT 1 FROM schedule_overrides WHERE date = ? AND profile_id = ? "
+                "AND slot_no = ? AND group_mark IS NULL AND override_type = 'cancel'",
+                (dt.to_iso(day), profile_id, slot_no),
+            )
             if template_exists is not None:
                 occupied = bool(template_exists)
             else:
                 occupied = self._has_template(profile_id, day, slot_no)
-            if occupied or template_subject_id is not None:
+            if (occupied or template_subject_id is not None) and cancelled is None:
                 raise RuleViolationError(
                     "Нельзя добавить занятие в занятый блок: выберите свободный слот или "
                     "пользуйтесь заменой (OVR-08)."
                 )
+            if cancelled is not None and occupied:
+                # В блоке есть пара по шаблону, но она отменена на эту дату.
+                # Поставить новую «вместо» отменённой — это замена, а не
+                # добавление: ``add`` на слот с шаблоном ALG-04 игнорирует
+                # (показывает занятие по плану). Меняем тип на ``replace``.
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "DELETE FROM schedule_overrides WHERE date = ? AND profile_id = ? "
+                        "AND slot_no = ? AND group_mark IS NULL AND override_type = 'cancel'",
+                        (dt.to_iso(day), profile_id, slot_no),
+                    )
+                override_type = OverrideType.REPLACE
+            elif cancelled is not None:
+                # Слота в шаблоне нет — отмена не нужна, блок и так свободен.
+                with self.db.transaction() as conn:
+                    conn.execute(
+                        "DELETE FROM schedule_overrides WHERE date = ? AND profile_id = ? "
+                        "AND slot_no = ? AND group_mark IS NULL AND override_type = 'cancel'",
+                        (dt.to_iso(day), profile_id, slot_no),
+                    )
             # Второй add на тот же блок дал бы две пары в одном слоте: одна
             # показывалась бы, вторая висела бы скрытым дублем.
             existing_add = self.db.fetchone(
@@ -1244,12 +1414,20 @@ class ScheduleOverrideRepository:
         """ALG-10 п. 2: ``add`` не бывает сиротским; остальные — без занятия в шаблоне."""
         if override.override_type == OverrideType.ADD:
             return False
+        return not self._has_template_on(
+            override.profile_id, week_type, override.slot_no, override.date
+        )
+
+    def _has_template_on(
+        self, profile_id: int, week_type: str, slot_no: int, value: date
+    ) -> bool:
+        """TPL-08: занятие есть в версии шаблона, действующей на эту дату."""
         row = self.db.fetchone(
             "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-            "AND slot_no = ? AND subject_id IS NOT NULL LIMIT 1",
-            (override.profile_id, week_type, override.slot_no),
+            "AND slot_no = ? AND subject_id IS NOT NULL AND effective_from <= ? LIMIT 1",
+            (profile_id, week_type, slot_no, dt.to_iso(value)),
         )
-        return row is None
+        return row is not None
 
     def delete_orphans(self, *, week_type_for_date: Any = None) -> list[ScheduleOverride]:
         """ALG-10 п. 5: массовое удаление сиротских одной кнопкой."""
@@ -1265,12 +1443,7 @@ class ScheduleOverrideRepository:
     def _has_template(self, profile_id: int, value: date, slot_no: int) -> bool:
         """Занят ли блок в шаблоне на дату (с учётом типа недели по ALG-01)."""
         week_type = self.week_type_for(value)
-        row = self.db.fetchone(
-            "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-            "AND slot_no = ? AND subject_id IS NOT NULL LIMIT 1",
-            (profile_id, week_type, slot_no),
-        )
-        return row is not None
+        return self._has_template_on(profile_id, week_type, slot_no, value)
 
     def week_type_for(self, value: date) -> str:
         """Тип недели даты по действующему якорю; при отсутствии якорей — lower."""

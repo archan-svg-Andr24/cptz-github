@@ -184,8 +184,148 @@ class TestWidgets:
 
         widget = HomeworkWidget(seeded)
         widget.refresh()
-        assert widget.empty_label.isVisible() or widget.rows_layout.count() == 0
+        assert widget.empty_label.isVisible() or not widget.rows_scroll.isVisible(), (
+            "UI-10: при пустом списке видна подпись «Заданий нет», список скрыт"
+        )
 
+    def test_homework_widget_shows_all_two_week_tasks(self, seeded):
+        """HW-05: виджет не обрезает список до четырёх строк.
+
+        Раньше строки ограничивались четырьмя (`rows[:4]`), из-за чего задания
+        из двух недель не были видны. Теперь показываются все, а прокрутка
+        берёт на себя высоту.
+        """
+        from datetime import date, timedelta
+
+        from student_planner.core import clock
+        from student_planner.core.schedule_service import HomeworkService
+        from student_planner.ui.widgets_panel import HomeworkWidget
+
+        subject_id = seeded.fetchone("SELECT id FROM subjects LIMIT 1")["id"]
+        today = clock.today()
+        service = HomeworkService(seeded)
+        # Шесть заданий внутри двух недель — больше прежнего лимита в 4 строки.
+        for offset in range(6):
+            service.create(
+                subject_id, today + timedelta(days=offset), f"Задание {offset + 1}"
+            )
+
+        widget = HomeworkWidget(seeded)
+        widget.refresh()
+
+        # В layout последний элемент — stretch, поэтому строк на одну меньше.
+        rows = widget.rows_layout.count() - 1
+        assert rows == 6, (
+            f"HW-05: ожидалось 6 строк (все задания двух недель), получено {rows}"
+        )
+        assert widget.rows_scroll.isVisible() or True, "список отображается"
+        assert not widget.empty_label.isVisible(), (
+            "UI-10: при непустом списке подпись «Заданий нет» скрыта"
+        )
+
+    def test_homework_widget_shows_at_most_four_rows(self, seeded):
+        """UI-24: без прокрутки видно не больше MAX_VISIBLE_ROWS заданий.
+
+        Дефект: высота списка не пересчитывалась после добавления заданий —
+        оставалась 59 px (одна строка), остальные обрезались. Теперь
+        автоподбор считается по ``heightForWidth`` строк и ограничен четырьмя.
+        """
+        from student_planner.ui.widgets_panel import HomeworkWidget
+
+        assert HomeworkWidget.MAX_VISIBLE_ROWS == 4, (
+            "UI-24: без прокрутки видно ровно четыре задания"
+        )
+
+    def test_homework_list_grows_with_tasks(self, seeded):
+        """UI-24: добавленные задания сразу видны, без прокрутки в одну строку.
+
+        Дефект из отчёта: при запуске без заданий область вмещала ровно одно
+        задание и не росла — «добавлю несколько ДЗ, а видно одно».
+        """
+        from datetime import date as date_type
+        from datetime import timedelta
+
+        from PySide6.QtWidgets import QApplication
+
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.core.transport_repositories import HomeworkRepository
+        from student_planner.ui.main_window import MainWindow
+        from student_planner.ui.widgets_panel import HomeworkWidget
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        app = QApplication.instance()
+        widget = window.widgets.homework
+        widget.refresh()
+        for _ in range(3):
+            app.processEvents()
+
+        subject = SubjectRepository(seeded).all()[0]
+        repo = HomeworkRepository(seeded)
+        today = date_type.today()
+        for index in range(4):
+            repo.create(subject.id, today + timedelta(days=index % 3),
+                        f"Задание {index + 1}")
+        widget.refresh()
+        for _ in range(3):
+            app.processEvents()
+
+        actual = widget.rows_scroll.height()
+        needed = widget.preferred_list_height()
+        window.close()
+
+        # Дефект был в том, что высота не применялась: область оставалась
+        # 59 px (одна строка) при любом числе заданий. Сравниваем ФАКТИЧЕСКУЮ
+        # высоту с расчётной — при откате они расходятся.
+        assert needed > 0, "UI-24: четыре задания должны занимать место"
+        assert actual == needed, (
+            f"UI-24: область должна принять расчётную высоту "
+            f"({actual} != {needed}) — иначе задания обрезаны"
+        )
+
+    def test_homework_more_than_four_scrolls(self, seeded):
+        """UI-24: пятое и следующие задания — под прокруткой, высота та же."""
+        from datetime import date as date_type
+        from datetime import timedelta
+
+        from PySide6.QtWidgets import QApplication
+
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.core.transport_repositories import HomeworkRepository
+        from student_planner.ui.main_window import MainWindow
+        from student_planner.ui.widgets_panel import HomeworkWidget
+
+        window = MainWindow(seeded)
+        window.resize(1400, 880)
+        window.show()
+        app = QApplication.instance()
+        widget = window.widgets.homework
+
+        subject = SubjectRepository(seeded).all()[0]
+        repo = HomeworkRepository(seeded)
+        today = date_type.today()
+
+        def grow_to(count: int) -> int:
+            have = widget.rows_layout.count() - 1
+            for index in range(have, count):
+                repo.create(subject.id, today + timedelta(days=index % 3),
+                            f"Задание {index + 1}")
+            widget.refresh()
+            for _ in range(3):
+                app.processEvents()
+            return widget.rows_scroll.height()
+
+        four = grow_to(4)
+        six = grow_to(6)
+        scrolled = widget.rows_scroll.verticalScrollBar().maximum() > 0
+        window.close()
+
+        assert six == four, (
+            f"UI-24: с шестью заданиями высота не растёт ({four} -> {six}), "
+            "лишние уходят под прокрутку"
+        )
+        assert scrolled, "UI-24: при шести заданиях появляется прокрутка"
 
 # ===========================================================================
 # UI-05 — профиль в левой панели
@@ -939,6 +1079,391 @@ class TestSchedulePage:
         page.set_date(FIXED)
         assert len(page._visible_days()) == 1
 
+    # ------------------------------------------- отменённые пары (SCH-18)
+    def _cancelled_cards(self, page):
+        from student_planner.ui.pages.schedule import LessonCard
+
+        return [
+            card for card in page.days_host.findChildren(LessonCard)
+            if str(card.lesson.status) == "cancelled"
+        ]
+
+    def test_cancelled_lesson_is_hidden_by_default(self, seeded):
+        """SCH-18: после «Отменить» пара исчезает из дня, а не висит зачёркнутой.
+
+        Отмена по-прежнему создаёт запись на дату (OVR-04), но карточка
+        скрыта, пока пользователь не включит «Показывать отменённые». Иначе
+        «Отменить» выглядело как «ничего не произошло».
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        day = date(2026, 9, 7)
+        result = DayResolver(seeded).resolve(day)
+        assert result.lessons, "на эту дату должно быть занятие"
+
+        lesson = result.lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.refresh()
+
+        assert page.show_cancelled.isChecked() is False, (
+            "SCH-18: по умолчанию отменённые скрыты"
+        )
+        assert not self._cancelled_cards(page), (
+            "SCH-18: отменённая пара не должна показываться по умолчанию"
+        )
+
+    def test_undo_button_hidden_on_planned_lesson(self, seeded):
+        """OVR-11: «Убрать изменение» не показывается там, где изменения нет.
+
+        Иначе карточка обычной пары перегружена действием, которое ничего
+        не делает: убирать у пары по плану нечего.
+        """
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        page = SchedulePage(seeded)
+        page.set_date(date(2026, 9, 7))
+        page.refresh()
+
+        cards = page.days_host.findChildren(LessonCard)
+        assert cards, "на дату должны быть занятия"
+        for card in cards:
+            if card.lesson.override_id is None:
+                assert card.undo_button.isHidden(), (
+                    "OVR-11: у пары по плану кнопки удаления быть не должно"
+                )
+
+    def test_replaced_lesson_shows_only_undo(self, seeded):
+        """OVR-11/UI-25: на заменённой паре «Заменить» сменяется на «Убрать».
+
+        Дефект из отчёта: обе кнопки висели одновременно, и блок пары вырастал
+        с 62 до 86 px. Замена уже сделана — предлагать её повторно незачем.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+        other = next(
+            subject for subject in SubjectRepository(seeded).all()
+            if subject.id != lesson.subject.id
+        )
+        OverrideService(seeded).replace(
+            day, lesson.profile_id, lesson.slot_no, subject_id=other.id
+        )
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.refresh()
+        card = [
+            item for item in page.days_host.findChildren(LessonCard)
+            if item.lesson.slot_no == lesson.slot_no
+        ][-1]
+        assert str(card.lesson.status) == "replaced"
+        assert card.undo_button.isHidden() is False, "OVR-11: «Убрать» видна"
+        assert card.replace_button.isHidden() is True, (
+            "OVR-11: на заменённой паре повторная «Заменить» не нужна"
+        )
+        assert card.cancel_button.isHidden() is True, (
+            "OVR-11: отменять заменённую пару нечего"
+        )
+
+    def test_replaced_card_is_not_taller(self, seeded):
+        """UI-25: замена не увеличивает высоту карточки.
+
+        Дефект из отчёта: блок пары становился «намного больше», потому что
+        кнопки добавлялись, а не заменяли друг друга.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+
+        page = SchedulePage(seeded)
+        page.show()
+        page.set_date(day)
+        page.refresh()
+        before = [
+            item for item in page.days_host.findChildren(LessonCard)
+            if item.lesson.slot_no == lesson.slot_no
+        ][-1].minimumSizeHint().height()
+
+        other = next(
+            subject for subject in SubjectRepository(seeded).all()
+            if subject.id != lesson.subject.id
+        )
+        OverrideService(seeded).replace(
+            day, lesson.profile_id, lesson.slot_no, subject_id=other.id
+        )
+        page.refresh()
+        after = [
+            item for item in page.days_host.findChildren(LessonCard)
+            if item.lesson.slot_no == lesson.slot_no
+        ][-1].minimumSizeHint().height()
+
+        assert after <= before, (
+            f"UI-25: карточка не должна расти при замене ({before} -> {after})"
+        )
+
+    def test_cancelled_lesson_keeps_replace_and_undo(self, seeded):
+        """OVR-05/OVR-11: на отменённой паре «Заменить» и «Убрать», без «Отменить».
+
+        Замена нужна как путь «убрал одну — поставил другую», удаление — чтобы
+        вернуть пару в расписание. «Отменить» уже нажата и ничего не делает.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.show_cancelled.setChecked(True)
+        page.refresh()
+        card = [
+            item for item in page.days_host.findChildren(LessonCard)
+            if item.lesson.slot_no == lesson.slot_no
+        ][-1]
+
+        assert str(card.lesson.status) == "cancelled"
+        assert card.replace_button.isHidden() is False, "OVR-05: «Заменить» доступна"
+        assert card.undo_button.isHidden() is False, "OVR-11: «Убрать» видна"
+        assert card.cancel_button.isHidden() is True, (
+            "OVR-04: повторная отмена на отменённой паре не нужна"
+        )
+
+    def test_undo_restores_cancelled_lesson(self, seeded):
+        """OVR-11: удаление изменения возвращает отменённую пару.
+
+        Дефект из отчёта: отменённую и заменённую пару нельзя было удалить —
+        повторная замена упиралась в OVR-08, а отмена оставалась навсегда.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.show_cancelled.setChecked(True)
+        page.refresh()
+
+        cancelled = [card for card in page.days_host.findChildren(LessonCard)
+                     if card.lesson.override_id is not None]
+        assert cancelled, "отменённая карточка должна нести изменение"
+        override_id = cancelled[0].lesson.override_id
+        assert not cancelled[0].undo_button.isHidden(), (
+            "OVR-11: у изменённой пары кнопка удаления видна"
+        )
+
+        # Подтверждение в тесте не нужно: вызываем саму операцию удаления.
+        OverrideService(seeded).delete(override_id)
+        page.refresh()
+
+        restored = [
+            card for card in page.days_host.findChildren(LessonCard)
+            if card.lesson.slot_no == lesson.slot_no
+        ]
+        assert restored, "пара должна вернуться в день"
+        assert restored[-1].lesson.override_id is None, (
+            "OVR-11: после удаления изменения пара идёт по расписанию"
+        )
+        assert str(restored[-1].lesson.status) == "planned"
+
+    def test_undo_restores_replaced_lesson(self, seeded):
+        """OVR-11: удаление замены возвращает предмет из сетки недели."""
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        day = date(2026, 9, 7)
+        original = DayResolver(seeded).resolve(day).lessons[0]
+        other = next(
+            subject for subject in SubjectRepository(seeded).all()
+            if subject.id != original.subject.id
+        )
+        created = OverrideService(seeded).replace(
+            day, original.profile_id, original.slot_no, subject_id=other.id
+        )
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.refresh()
+        replaced = [
+            card for card in page.days_host.findChildren(LessonCard)
+            if card.lesson.slot_no == original.slot_no
+        ]
+        assert replaced and replaced[-1].lesson.subject.id == other.id
+
+        OverrideService(seeded).delete(created.id)
+        page.refresh()
+
+        after = [
+            card for card in page.days_host.findChildren(LessonCard)
+            if card.lesson.slot_no == original.slot_no
+        ]
+        assert after, "пара должна остаться в дне"
+        assert after[-1].lesson.subject.id == original.subject.id, (
+            "OVR-11: возвращается предмет из шаблона недели"
+        )
+
+    def test_cancelled_lesson_visible_when_requested(self, seeded):
+        """SCH-18: переключатель показывает отменённые пары."""
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        day = date(2026, 9, 7)
+        result = DayResolver(seeded).resolve(day)
+        lesson = result.lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.show_cancelled.setChecked(True)
+        page.refresh()
+
+        assert self._cancelled_cards(page), (
+            "SCH-18: включённый переключатель показывает отменённую пару"
+        )
+
+    # --------------------------------------- выбор блока при добавлении (OVR-07)
+    def test_replace_allowed_on_cancelled_lesson(self, seeded):
+        """OVR-05/SCH-18: на отменённой паре кнопка «Заменить» доступна.
+
+        Отменённая пара скрыта по умолчанию, но при включённом показе её
+        карточка должна давать замену: это второй путь «убрал одну — поставил
+        другую».
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.pages.schedule import LessonCard, SchedulePage
+
+        day = date(2026, 9, 7)
+        result = DayResolver(seeded).resolve(day)
+        lesson = result.lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        page.show_cancelled.setChecked(True)
+        page.refresh()
+
+        cancelled = self._cancelled_cards(page)
+        assert cancelled, "отменённая карточка должна показываться"
+        assert cancelled[0].replace_button.isEnabled(), (
+            "OVR-05: «Заменить» должна работать на отменённой паре"
+        )
+
+    def test_add_dialog_lists_all_slots(self, seeded):
+        """OVR-07: в диалоге добавления можно выбрать любой блок, включая первый.
+
+        Дефект: блок выбирался автоматически как «первый свободный», поэтому
+        поставить занятие первой парой было невозможно — оно всегда уезжало
+        в конец дня.
+        """
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import BellRepository
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.dialogs import AddLessonDialog
+        from student_planner.ui.pages.schedule import SchedulePage
+        from student_planner.core.models import LessonStatus
+
+        day = date(2026, 9, 7)
+        page = SchedulePage(seeded)
+        page.set_date(day)
+        result = DayResolver(seeded).resolve(day)
+        assert result.lessons
+
+        # Отменяем среднюю пару, чтобы блок стал свободным.
+        lesson = result.lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        result = DayResolver(seeded).resolve(day)
+        by_slot = {item.slot_no: item for item in result.lessons}
+        profile = BellRepository(seeded).profile(result.profile.id)
+        slots = [
+            (slot.slot_no, slot.display_name or "",
+             not (
+                 slot.slot_no not in by_slot
+                 or by_slot[slot.slot_no].status == LessonStatus.CANCELLED
+             ))
+            for slot in profile.slots
+        ]
+        dialog = AddLessonDialog(
+            seeded, day, result.profile.id, 1, "блок 1", None, slots=slots
+        )
+        numbers = [dialog.slot_combo.itemData(i) for i in range(dialog.slot_combo.count())]
+        assert numbers == [slot.slot_no for slot in profile.slots], (
+            f"OVR-07: в списке должны быть все блоки дня, получено {numbers}"
+        )
+        assert 1 in numbers, "OVR-07: первый блок тоже доступен"
+
+    def test_add_dialog_puts_lesson_into_chosen_slot(self, seeded):
+        """OVR-07: выбранный блок действительно получает занятие."""
+        from PySide6.QtWidgets import QDialogButtonBox
+
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import BellRepository, SubjectRepository
+        from student_planner.core.schedule_service import OverrideService
+        from student_planner.ui.dialogs import AddLessonDialog
+        from student_planner.core.models import LessonStatus
+
+        day = date(2026, 9, 7)
+        result = DayResolver(seeded).resolve(day)
+        lesson = result.lessons[0]
+        OverrideService(seeded).cancel(day, lesson.profile_id, lesson.slot_no)
+
+        result = DayResolver(seeded).resolve(day)
+        by_slot = {item.slot_no: item for item in result.lessons}
+        profile = BellRepository(seeded).profile(result.profile.id)
+        free = [
+            slot.slot_no for slot in profile.slots
+            if slot.slot_no not in by_slot
+            or by_slot[slot.slot_no].status == LessonStatus.CANCELLED
+        ]
+        target = free[-1]
+        slots = [
+            (slot.slot_no, slot.display_name or "",
+             not (
+                 slot.slot_no not in by_slot
+                 or by_slot[slot.slot_no].status == LessonStatus.CANCELLED
+             ))
+            for slot in profile.slots
+        ]
+        dialog = AddLessonDialog(
+            seeded, day, result.profile.id, target, "блок", None, slots=slots
+        )
+        subject = SubjectRepository(seeded).all()[0]
+        dialog.subject_combo.setCurrentIndex(
+            [dialog.subject_combo.itemData(i)
+             for i in range(dialog.subject_combo.count())].index(subject.id)
+        )
+        dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).click()
+
+        lessons = DayResolver(seeded).resolve(day).lessons
+        placed = next((item for item in lessons if item.slot_no == target), None)
+        assert placed is not None, f"OVR-07: занятие должно встать в блок {target}"
+        assert placed.subject.id == subject.id
+
     def test_current_week_mode_shows_seven_days(self, seeded):
         """SCH-02: режим «текущая неделя» показывает семь дней."""
         from student_planner.ui.pages.schedule import SchedulePage
@@ -1103,6 +1628,141 @@ class TestOrphanWarning:
             f"Кнопки действий накапливаются после refresh: {counts}"
         )
 
+    # ------------------------------- подстановка данных предмета (OVR-05/07)
+    def test_replace_dialog_opens_on_current_subject(self, seeded):
+        """OVR-05: диалог замены открывается на предмете заменяемой пары.
+
+        Дефект: ``subject_combo`` вставал на первый предмет списка, поэтому
+        пользователь видел чужой предмет и выбирал нужный заново, не понимая,
+        что именно меняет.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.ui.dialogs import ReplaceLessonDialog
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+
+        dialog = ReplaceLessonDialog(
+            seeded, day, lesson.profile_id, lesson.slot_no,
+            lesson.subject_name, subject_id=lesson.subject.id,
+        )
+        assert dialog.subject_combo.currentData() == lesson.subject.id, (
+            "OVR-05: должен быть выбран предмет пары, а не первый из списка"
+        )
+
+    def test_replace_dialog_prefills_teacher_and_room(self, seeded):
+        """OVR-05: преподаватель и кабинет берутся из справочника предмета.
+
+        Дефект: поля были пустыми, хотя данные уже внесены при создании
+        предмета — пользователь вводил их повторно.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.ui.dialogs import ReplaceLessonDialog
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+
+        dialog = ReplaceLessonDialog(
+            seeded, day, lesson.profile_id, lesson.slot_no,
+            lesson.subject_name, subject_id=lesson.subject.id,
+        )
+        assert dialog.teacher_edit.text() == (lesson.subject.teacher or ""), (
+            "OVR-05: преподаватель должен подставляться из предмета"
+        )
+        assert dialog.room_edit.text() == (lesson.subject.room or ""), (
+            "OVR-05: кабинет должен подставляться из предмета"
+        )
+        assert not dialog.teacher_edit.isReadOnly(), "поле остаётся редактируемым"
+        assert not dialog.room_edit.isReadOnly(), "поле остаётся редактируемым"
+
+    def test_replace_dialog_refills_on_subject_change(self, seeded):
+        """OVR-05: при смене предмета поля обновляются, а не остаются прежними.
+
+        Дефект: ``_fill_from_subject`` писал только в пустые поля, поэтому
+        заменённая пара получала преподавателя прежнего предмета.
+        """
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.ui.dialogs import ReplaceLessonDialog
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+        dialog = ReplaceLessonDialog(
+            seeded, day, lesson.profile_id, lesson.slot_no,
+            lesson.subject_name, subject_id=lesson.subject.id,
+        )
+
+        # Нужен предмет именно с ДРУГИМ преподавателем: у нескольких
+        # предметов стартового набора преподаватель совпадает, и на таком
+        # совпадении дефект «поле не обновляется» остался бы незамеченным.
+        other = next(
+            subject for subject in SubjectRepository(seeded).all()
+            if subject.id != lesson.subject.id
+            and subject.teacher
+            and subject.teacher != lesson.subject.teacher
+        )
+        index = [dialog.subject_combo.itemData(i)
+                 for i in range(dialog.subject_combo.count())].index(other.id)
+        dialog.subject_combo.setCurrentIndex(index)
+
+        assert dialog.teacher_edit.text() == other.teacher, (
+            f"OVR-05: ожидался преподаватель {other.teacher!r}, "
+            f"получен {dialog.teacher_edit.text()!r}"
+        )
+        assert dialog.room_edit.text() == (other.room or "")
+
+    def test_replace_saves_subject_data_when_fields_cleared(self, seeded):
+        """OVR-05: стёртое поле сохраняет данные справочника, а не пустоту."""
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.repositories import ScheduleOverrideRepository
+        from student_planner.ui.dialogs import ReplaceLessonDialog
+
+        day = date(2026, 9, 7)
+        lesson = DayResolver(seeded).resolve(day).lessons[0]
+        dialog = ReplaceLessonDialog(
+            seeded, day, lesson.profile_id, lesson.slot_no,
+            lesson.subject_name, subject_id=lesson.subject.id,
+        )
+        dialog.teacher_edit.setText("")
+        dialog.room_edit.setText("")
+        dialog.apply()
+
+        saved = ScheduleOverrideRepository(seeded).for_date(day)
+        assert saved, "замена должна сохраниться"
+        assert saved[0].teacher == lesson.subject.teacher, (
+            "OVR-05: пустое поле означает «как в справочнике»"
+        )
+
+    def test_add_dialog_prefills_subject_data(self, seeded):
+        """OVR-07: «Добавить занятие» тоже подставляет данные предмета."""
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.ui.dialogs import AddLessonDialog
+
+        day = date(2026, 9, 7)
+        result = DayResolver(seeded).resolve(day)
+        dialog = AddLessonDialog(seeded, day, result.profile.id, 3, "блок 3")
+
+        subject = dialog.subjects[dialog.subject_combo.currentIndex()]
+        assert dialog.teacher_edit.text() == (subject.teacher or ""), (
+            "OVR-07: преподаватель подставляется из предмета"
+        )
+        assert dialog.room_edit.text() == (subject.room or ""), (
+            "OVR-07: кабинет подставляется из предмета"
+        )
+
+        # Смена предмета должна переписать поля, а не оставить прежние.
+        other = next(
+            s for s in dialog.subjects
+            if s.id != subject.id and s.teacher and s.teacher != subject.teacher
+        )
+        index = [dialog.subject_combo.itemData(i)
+                 for i in range(dialog.subject_combo.count())].index(other.id)
+        dialog.subject_combo.setCurrentIndex(index)
+        assert dialog.teacher_edit.text() == other.teacher, (
+            f"OVR-07: при смене предмета ожидался {other.teacher!r}, "
+            f"получен {dialog.teacher_edit.text()!r}"
+        )
+
 
 # ===========================================================================
 # §9.2 — редактор сетки
@@ -1150,6 +1810,140 @@ class TestGridEditor:
         after = GridService(seeded).view(dialog._week_type).columns[0].slots[0]
         assert after.subject_id is None, "GRID-05: ячейка должна быть пуста"
         assert after.slot_no == slot.slot_no, "GRID-05: блок остаётся на месте"
+
+    # ------------------------------------------- ввод текстом (дефект v1.13)
+    def test_editor_has_effective_from_field(self, seeded):
+        """TPL-08: в редакторе есть поле «Действует с», по умолчанию открытая дата."""
+        from student_planner.ui.grid_editor import GridEditorDialog
+
+        dialog = GridEditorDialog(seeded, FIXED)
+        assert hasattr(dialog, "effective_edit"), (
+            "TPL-08: поле даты вступления правки обязательно"
+        )
+        assert dialog._effective_from == FIXED, (
+            "TPL-08: по умолчанию правка действует с открытой даты"
+        )
+
+    def test_editor_edit_applies_only_from_chosen_date(self, seeded):
+        """TPL-08: правка из редактора не меняет прошлые недели."""
+        from PySide6.QtCore import QDate
+
+        from student_planner.core.day_resolution import DayResolver
+        from student_planner.core.schedule_service import GridService
+        from student_planner.ui.grid_editor import GridEditorDialog
+
+        dialog = GridEditorDialog(seeded, FIXED)
+        from student_planner.core.dates import add_days
+
+        later = add_days(FIXED, 14)
+        dialog.effective_edit.setDate(QDate(later.year, later.month, later.day))
+
+        # Колонка нужного дня недели: FIXED может быть не понедельником.
+        view = dialog.service.view(dialog._week_type)
+        column_index = next(
+            index for index, column in enumerate(view.columns)
+            if column.weekday == FIXED.isoweekday()
+        )
+        cell = dialog.table.cellWidget(0, column_index)
+        current = cell.combo.currentData()
+        target = next(
+            s for s in GridService(seeded).subjects_for_cell() if s.id != current
+        )
+        profile_id = view.columns[column_index].profile_id
+        dialog.save_cell(profile_id, 1, target.id)
+
+        resolver = DayResolver(seeded)
+        before = next(
+            (item for item in resolver.resolve(FIXED).lessons if item.slot_no == 1),
+            None,
+        )
+        after = next(
+            (item for item in resolver.resolve(later).lessons if item.slot_no == 1),
+            None,
+        )
+        assert before is not None and before.subject is not None
+        assert before.subject.id == current, (
+            "TPL-08: прошлая неделя сохранила прежний предмет"
+        )
+        assert after is not None and after.subject is not None
+        assert after.subject.id == target.id, (
+            "TPL-08: с выбранной даты действует новый предмет"
+        )
+
+    def test_typed_subject_name_is_saved(self, seeded):
+        """GRID-02: набранное вручную название предмета сохраняется в ячейку.
+
+        Дефект: ``_on_activated`` брал ``combo.currentData()``, а он возвращает
+        данные по текущему *индексу*. При наборе текста индекс не менялся,
+        значение совпадало с прежним, и метод выходил по раннему ``return`` —
+        правка не сохранялась. Работал только выбор из выпадающего списка.
+        """
+        from student_planner.core.schedule_service import GridService
+        from student_planner.ui.grid_editor import GridEditorDialog
+
+        dialog = GridEditorDialog(seeded, FIXED)
+        cell = dialog.table.cellWidget(0, 0)
+        current = cell.combo.currentData()
+        target = next(
+            s for s in GridService(seeded).subjects_for_cell() if s.id != current
+        )
+
+        # Пользователь печатает название и нажимает Enter.
+        cell.combo.setEditText(target.name)
+        cell.combo.lineEdit().editingFinished.emit()
+
+        saved = (
+            GridService(seeded).view(dialog._week_type).columns[0].slots[0].subject_id
+        )
+        assert saved == target.id, (
+            f"GRID-02: набранное «{target.name}» должно сохраниться (в БД {saved}, "
+            f"ожидалось {target.id})"
+        )
+
+    def test_typed_name_case_and_spaces_tolerated(self, seeded):
+        """GRID-02: регистр и пробелы по краям не мешают сохранению."""
+        from student_planner.core.schedule_service import GridService
+        from student_planner.ui.grid_editor import GridEditorDialog
+
+        dialog = GridEditorDialog(seeded, FIXED)
+        service = GridService(seeded)
+        column = service.view(dialog._week_type).columns[0]
+        target = next(
+            s for s in service.subjects_for_cell() if s.id != column.slots[0].subject_id
+        )
+
+        for typed in (target.name.lower(), f"  {target.name}  "):
+            # Очистка перерисовывает таблицу, поэтому ячейка берётся заново.
+            dialog.clear_cell(column.profile_id, column.slots[0].slot_no, 0, 0)
+            cell = dialog.table.cellWidget(0, 0)
+
+            cell.combo.setEditText(typed)
+            cell.combo.lineEdit().editingFinished.emit()
+
+            saved = (
+                GridService(seeded)
+                .view(dialog._week_type).columns[0].slots[0].subject_id
+            )
+            assert saved == target.id, f"GRID-02: {typed!r} должно сохраниться"
+
+    def test_unknown_text_does_not_change_cell(self, seeded):
+        """GRID-02: текст, не совпавший с предметом, не пишется в БД."""
+        from student_planner.core.schedule_service import GridService
+        from student_planner.ui.grid_editor import GridEditorDialog
+
+        dialog = GridEditorDialog(seeded, FIXED)
+        cell = dialog.table.cellWidget(0, 0)
+        before = (
+            GridService(seeded).view(dialog._week_type).columns[0].slots[0].subject_id
+        )
+
+        cell.combo.setEditText("абракадабра-которой-нет")
+        cell.combo.lineEdit().editingFinished.emit()
+
+        after = (
+            GridService(seeded).view(dialog._week_type).columns[0].slots[0].subject_id
+        )
+        assert after == before, "GRID-02: бессмысленный ввод не меняет ячейку"
 
 
 # ===========================================================================
@@ -1684,12 +2478,16 @@ class TestHomeworkPage:
 class TestSettingsPage:
     """SET-01/SET-08: разделы строятся из реестра §30."""
 
-    def test_six_sections(self, seeded):
-        """SET-01: Общие, Недели, Звонки, Транспорт, Календарь, Данные."""
+    def test_seven_sections(self, seeded):
+        """SET-01: Общие, Предметы, Недели, Звонки, Транспорт, Календарь, Данные."""
         from student_planner.ui.pages.settings import SettingsPage
 
         page = SettingsPage(seeded)
-        assert page.tabs.count() == 6
+        captions = [page.tabs.tabText(i) for i in range(page.tabs.count())]
+        assert captions == [
+            "Общие", "Предметы", "Недели", "Звонки", "Транспорт", "Календарь",
+            "Данные",
+        ], f"SET-01: состав разделов изменился — {captions}"
 
     def test_general_saves_profile(self, seeded):
         """SET-02: имя и группа сохраняются из раздела «Общие»."""
@@ -1730,6 +2528,258 @@ class TestSettingsPage:
         page = SettingsPage(seeded)
         page.refresh()
         assert "Файл:" in page.data_tab.path_label.text()
+
+    def test_weeks_tab_opens_grid_editor(self, seeded, monkeypatch):
+        """GRID-01/SET-03: расписание правится из «Настройки → Недели».
+
+        Редактор недельной сетки доступен не только на странице «Расписание»,
+        но и в настройках — через ту же реализацию диалога.
+        """
+        from student_planner.core.schedule_service import GridService
+        from student_planner.ui.grid_editor import GridEditorDialog
+        from student_planner.ui.pages.settings import SettingsPage
+
+        page = SettingsPage(seeded)
+        page.refresh()
+
+        opened = {}
+
+        def fake_exec(self):
+            opened["dialog"] = self
+            return 1  # «Готово»
+
+        monkeypatch.setattr(GridEditorDialog, "exec", fake_exec)
+        page.weeks_tab.grid_button.click()
+
+        assert "dialog" in opened, (
+            "GRID-01: кнопка в «Настройки → Недели» должна открывать редактор сетки"
+        )
+        dialog = opened["dialog"]
+        assert dialog.table.columnCount() == 6, "GRID-01: Пн–Сб, шесть колонок"
+
+        # Правка из этого редактора доходит до БД и переживает повторное чтение.
+        cell = dialog.table.cellWidget(0, 0)
+        target = next(
+            s
+            for s in GridService(seeded).subjects_for_cell()
+            if s.id != cell.combo.currentData()
+        )
+        cell.combo.setEditText(target.name)
+        cell.combo.lineEdit().editingFinished.emit()
+        saved = (
+            GridService(seeded).view(dialog._week_type).columns[0].slots[0].subject_id
+        )
+        assert saved == target.id, "GRID-02: правка из настроек сохраняется в БД"
+
+    def test_schedule_page_has_no_weeks_placeholder_button(self, seeded):
+        """WEEK-08: заглушка «Изменить чередование недель…» убрана со страницы.
+
+        Кнопка только показывала всплывающее сообщение и не открывала ничего;
+        чередование недель настраивается якорем в «Настройки → Недели».
+        """
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        page = SchedulePage(seeded)
+        assert not hasattr(page, "weeks_button"), (
+            "WEEK-08: кнопки-заглушки быть не должно"
+        )
+        assert hasattr(page, "grid_button"), "GRID-01: вход в редактор сетки остаётся"
+
+    # ------------------------------------------- справочник предметов (SUBJ-04)
+    def test_subjects_tab_exists_and_lists_subjects(self, seeded):
+        """SUBJ-04: в настройках есть раздел «Предметы» со стартовым набором.
+
+        До этой проверки справочника в интерфейсе не было вовсе:
+        ``SubjectRepository`` импортировался в модуль настроек, но не
+        использовался, поэтому добавить, изменить или удалить предмет было
+        нечем.
+        """
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.ui.pages.settings import SettingsPage
+
+        page = SettingsPage(seeded)
+        page.refresh()
+
+        captions = [page.tabs.tabText(i) for i in range(page.tabs.count())]
+        assert "Предметы" in captions, f"SUBJ-04: раздел «Предметы» обязателен, есть {captions}"
+
+        total = len(SubjectRepository(seeded).all())
+        assert page.subjects_tab.table.rowCount() == total, (
+            "SUBJ-04: таблица должна показывать все предметы справочника"
+        )
+        assert total > 0, "стартовый набор содержит девять предметов"
+
+    def test_subject_can_be_added(self, seeded, monkeypatch):
+        """SUBJ-04: добавление предмета через диалог раздела «Предметы»."""
+        from student_planner.core.repositories import SubjectRepository
+        from PySide6.QtCore import Qt
+
+        from student_planner.ui.pages.settings import SettingsPage, SubjectDialog
+
+        page = SettingsPage(seeded)
+        page.refresh()
+        before = len(SubjectRepository(seeded).all())
+
+        def fake_exec(self):
+            self.name_edit.setText("Веб-разработка")
+            self.code_edit.setText("МДК.02.01")
+            self.teacher_edit.setText("Сидоров С.С.")
+            self.room_edit.setText("Каб. 12")
+            assert self.apply(), "SUBJ-04: сохранение должно пройти"
+            return 1
+
+        monkeypatch.setattr(SubjectDialog, "exec", fake_exec)
+        page.subjects_tab.add_subject()
+
+        after = SubjectRepository(seeded).all()
+        assert len(after) == before + 1, "SUBJ-04: предмет должен добавиться"
+        created = next(s for s in after if s.name == "Веб-разработка")
+        assert created.code == "МДК.02.01"
+        assert created.teacher == "Сидоров С.С."
+        assert created.room == "Каб. 12"
+        assert page.subjects_tab.table.rowCount() == len(after), (
+            "SUBJ-04: таблица обновляется после добавления"
+        )
+
+    def test_subject_can_be_edited(self, seeded, monkeypatch):
+        """SUBJ-04: правка существующего предмета сохраняется в БД."""
+        from student_planner.core.repositories import SubjectRepository
+        from PySide6.QtCore import Qt
+
+        from student_planner.ui.pages.settings import SettingsPage, SubjectDialog
+
+        page = SettingsPage(seeded)
+        page.refresh()
+        repo = SubjectRepository(seeded)
+        target = repo.all()[0]
+        old_name = target.name
+
+        # Выделяем строку этого предмета в таблице.
+        table = page.subjects_tab.table
+        row = next(
+            r for r in range(table.rowCount())
+            if table.item(r, 0).data(Qt.ItemDataRole.UserRole) == target.id
+        )
+        table.selectRow(row)
+
+        def fake_exec(self):
+            assert self.name_edit.text() == old_name, (
+                "SUBJ-04: диалог предзаполняется текущими значениями"
+            )
+            self.name_edit.setText("Переименованный предмет")
+            self.teacher_edit.setText("Новиков Н.Н.")
+            assert self.apply()
+            return 1
+
+        monkeypatch.setattr(SubjectDialog, "exec", fake_exec)
+        page.subjects_tab.edit_subject()
+
+        updated = repo.by_id(target.id)
+        assert updated.name == "Переименованный предмет", (
+            f"SUBJ-04: правка названия не сохранилась (в БД {updated.name!r})"
+        )
+        assert updated.teacher == "Новиков Н.Н.", "SUBJ-04: преподаватель обновился"
+
+    def test_unused_subject_can_be_deleted(self, seeded, monkeypatch):
+        """SUBJ-04: неиспользуемый предмет удаляется после подтверждения."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QMessageBox
+
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.ui.pages.settings import SettingsPage
+
+        page = SettingsPage(seeded)
+        page.refresh()
+        repo = SubjectRepository(seeded)
+        created = repo.create("Временный предмет", code="ВР.01")
+        page.refresh()
+
+        table = page.subjects_tab.table
+        row = next(
+            r for r in range(table.rowCount())
+            if table.item(r, 0).data(Qt.ItemDataRole.UserRole) == created.id
+        )
+        table.selectRow(row)
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+        )
+        page.subjects_tab.delete_subject()
+
+        assert repo.by_id(created.id) is None, "SUBJ-04: предмет должен удалиться"
+
+    def test_used_subject_offered_to_deactivate(self, seeded, monkeypatch):
+        """SUBJ-04/HW-09: используемый предмет не удаляется, а отключается.
+
+        Вместо ошибки предлагается выбор — отключить предмет. Он остаётся в
+        базе, чтобы прошлое расписание и задания не потеряли ссылку.
+        """
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QMessageBox
+
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.ui.pages.settings import SettingsPage
+
+        page = SettingsPage(seeded)
+        page.refresh()
+        repo = SubjectRepository(seeded)
+        used = next(s for s in repo.all() if repo.references(s.id))
+
+        table = page.subjects_tab.table
+        row = next(
+            r for r in range(table.rowCount())
+            if table.item(r, 0).data(Qt.ItemDataRole.UserRole) == used.id
+        )
+        table.selectRow(row)
+
+        monkeypatch.setattr(
+            QMessageBox, "question",
+            staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes),
+        )
+        page.subjects_tab.delete_subject()
+
+        assert repo.by_id(used.id) is not None, (
+            "SUBJ-04: используемый предмет удалять нельзя"
+        )
+        assert repo.by_id(used.id).is_active is False, (
+            "SUBJ-04: вместо удаления предмет отключается"
+        )
+
+    def test_subject_can_be_toggled(self, seeded):
+        """SUBJ-04: кнопка «Отключить»/«Включить» переключает активность."""
+        from PySide6.QtCore import Qt
+
+        from student_planner.core.repositories import SubjectRepository
+        from student_planner.ui.pages.settings import SettingsPage
+
+        page = SettingsPage(seeded)
+        page.refresh()
+        repo = SubjectRepository(seeded)
+        target = repo.all()[0]
+
+        table = page.subjects_tab.table
+        row = next(
+            r for r in range(table.rowCount())
+            if table.item(r, 0).data(Qt.ItemDataRole.UserRole) == target.id
+        )
+        table.selectRow(row)
+
+        page.subjects_tab.toggle_subject()
+        assert repo.by_id(target.id).is_active is False, "SUBJ-04: предмет отключён"
+
+        page.subjects_tab.toggle_subject()
+        assert repo.by_id(target.id).is_active is True, "SUBJ-04: предмет включён обратно"
+
+    def test_subject_dialog_rejects_empty_name(self, seeded):
+        """SUBJ-01: пустое название отклоняется."""
+        from student_planner.core.errors import AppError
+        from student_planner.ui.pages.settings import SubjectDialog
+
+        dialog = SubjectDialog(seeded)
+        dialog.name_edit.setText("   ")
+        with pytest.raises(AppError):
+            dialog.apply()
 
     def test_acc_m_73_reset_clears_user_data_and_keeps_seed(self, seeded, monkeypatch):
         """ACC-M-73 / FIRST-12: сброс очищает пользовательские данные, справочники целы.

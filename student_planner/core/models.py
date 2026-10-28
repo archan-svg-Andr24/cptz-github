@@ -319,7 +319,13 @@ class BellProfile:
 
 @dataclass(frozen=True)
 class TemplateCell:
-    """Занятие шаблона: ``(profile_id, week_type, slot_no) → subject_id`` (TPL-01)."""
+    """Ячейка шаблона на дату: ``(profile_id, week_type, slot_no)`` (TPL-01).
+
+    ``effective_from`` — дата, с которой действует эта версия ячейки (TPL-08):
+    строка описывает состояние с ``effective_from`` до начала следующей версии
+    той же позиции. ``subject_id is None`` — явная очистка (надгробие), чтобы
+    удаление пары не «открывало» более старое значение.
+    """
 
     id: int
     profile_id: int
@@ -327,6 +333,12 @@ class TemplateCell:
     slot_no: int
     subject_id: int | None
     group_mark: int | None = None
+    effective_from: date | None = None
+
+    @property
+    def is_tombstone(self) -> bool:
+        """Ячейка означает «занятия нет», а не отсутствие записи."""
+        return self.subject_id is None
 
 
 @dataclass(frozen=True)

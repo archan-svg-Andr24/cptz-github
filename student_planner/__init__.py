@@ -18,6 +18,6 @@ APP_TITLE = "Студенческий органайзер"
 APP_VERSION = "1.0.0"
 
 #: Версия схемы БД, известная приложению (DATA-19, Прил. Б).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 __all__ = ["APP_NAME", "APP_TITLE", "APP_VERSION", "SCHEMA_VERSION"]

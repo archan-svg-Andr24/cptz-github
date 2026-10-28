@@ -23,6 +23,7 @@ from .database import Database, create_database, is_initialized
 from .dates import to_iso
 from .models import WeekType
 from .money import to_db
+from .repositories import BASE_DUE_DATE
 from .settings_registry import SettingsKeys, default_registry
 
 log = logging.getLogger(__name__)
@@ -214,8 +215,8 @@ class Seeder:
                         continue
                     conn.execute(
                         "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                        "subject_id) VALUES (?, ?, ?, NULL, ?)",
-                        (profile_id, week_type, slot_no, subject_id),
+                        "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                        (profile_id, week_type, slot_no, subject_id, BASE_DUE_DATE),
                     )
                     added += 1
         return added

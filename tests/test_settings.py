@@ -12,6 +12,7 @@ import pytest
 
 from student_planner.core.errors import SettingsError
 from student_planner.core.seeding import Seeder
+from student_planner import SCHEMA_VERSION
 from student_planner.core.settings_registry import (
     RECALC_TRIGGER_KEYS,
     SettingType,
@@ -48,7 +49,7 @@ def test_settings_registry_has_all_required_keys() -> None:
 def test_settings_defaults_match_appendix_a() -> None:
     """Значения стартового набора Прил. А.0."""
     defaults = default_registry().defaults()
-    assert defaults[SettingsKeys.SCHEMA_VERSION] == "1"
+    assert defaults[SettingsKeys.SCHEMA_VERSION] == str(SCHEMA_VERSION)
     assert defaults[SettingsKeys.STRELKA_PERIOD_ANCHOR_DATE] == ""
     assert defaults[SettingsKeys.STRELKA_INITIAL_RIDE_COUNT] == "0"
     assert defaults[SettingsKeys.STRELKA_PERIOD_DAYS] == "30"
@@ -254,7 +255,7 @@ def test_readonly_settings_cannot_be_changed(db) -> None:
 
 def test_schema_version_readonly_but_consistent(db) -> None:
     service = SettingsService(db)
-    assert service.get_int(SettingsKeys.SCHEMA_VERSION) == 1
+    assert service.get_int(SettingsKeys.SCHEMA_VERSION) == SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------

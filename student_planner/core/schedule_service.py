@@ -135,8 +135,14 @@ class GridService:
         self.overrides = ScheduleOverrideRepository(db)
 
     # ------------------------------------------------------------------ чтение
-    def view(self, week_type: str, *, weekdays: tuple[int, ...] = (1, 2, 3, 4, 5, 6)) -> GridView:
-        """GRID-01: Пн–Сб × все слоты профиля, включая пустые."""
+    def view(
+        self,
+        week_type: str,
+        *,
+        weekdays: tuple[int, ...] = (1, 2, 3, 4, 5, 6),
+        on_date: date | str | None = None,
+    ) -> GridView:
+        """GRID-01/TPL-08: Пн–Сб × все слоты профиля на дату, включая пустые."""
         self._check_week_type(week_type)
         subjects = {item.id: item for item in self.subjects.all()}
         columns: list[GridColumn] = []
@@ -150,7 +156,7 @@ class GridService:
                 continue
             slots: list[GridSlot] = []
             for slot in profile.slots:
-                cell = self.templates.cell(profile.id, week_type, slot.slot_no)
+                cell = self.templates.cell(profile.id, week_type, slot.slot_no, on_date=on_date)
                 subject = subjects.get(cell.subject_id) if cell else None  # type: ignore[union-attr]
                 slots.append(
                     GridSlot(
@@ -220,9 +226,19 @@ class GridService:
 
     # ------------------------------------------------------------------ запись
     def set_cell(
-        self, profile_id: int, week_type: str, slot_no: int, subject_id: int | None
+        self,
+        profile_id: int,
+        week_type: str,
+        slot_no: int,
+        subject_id: int | None,
+        *,
+        effective_from: date | str | None = None,
     ) -> TemplateCell | None:
-        """GRID-02/DATA-20: выбор сохраняет ячейку немедленно; ``None`` очищает."""
+        """GRID-02/DATA-20/TPL-08: выбор сохраняет ячейку сразу; ``None`` очищает.
+
+        ``effective_from`` — дата, с которой действует правка: прошлые недели
+        сохраняют прежнее расписание.
+        """
         self._check_week_type(week_type)
         self._require_slot(profile_id, slot_no)
         if subject_id is not None:
@@ -234,12 +250,23 @@ class GridService:
                     f"Предмет «{subject.name}» отключён: включите его в справочнике (SUBJ-03).",
                     field="subject_id",
                 )
-        return self.templates.set_cell(profile_id, week_type, slot_no, subject_id)
+        return self.templates.set_cell(
+            profile_id, week_type, slot_no, subject_id, effective_from=effective_from
+        )
 
-    def clear_cell(self, profile_id: int, week_type: str, slot_no: int) -> None:
-        """GRID-05/DATA-20: удаляется только строка шаблона."""
+    def clear_cell(
+        self,
+        profile_id: int,
+        week_type: str,
+        slot_no: int,
+        *,
+        effective_from: date | str | None = None,
+    ) -> None:
+        """GRID-05/DATA-20/TPL-08: пара убирается с даты; прошлые недели целы."""
         self._check_week_type(week_type)
-        self.templates.clear_cell(profile_id, week_type, slot_no)
+        self.templates.clear_cell(
+            profile_id, week_type, slot_no, effective_from=effective_from
+        )
 
     def create_subject_for_cell(
         self,
@@ -251,16 +278,21 @@ class GridService:
         code: str | None = None,
         teacher: str | None = None,
         room: str | None = None,
+        effective_from: date | str | None = None,
     ) -> Subject:
         """SUBJ-05/GRID-02: новый предмет создаётся прямо из ячейки."""
         self._check_week_type(week_type)
         self._require_slot(profile_id, slot_no)
         subject = self.subjects.create(name, code=code, teacher=teacher, room=room)
-        self.templates.set_cell(profile_id, week_type, slot_no, subject.id)
+        self.templates.set_cell(
+            profile_id, week_type, slot_no, subject.id, effective_from=effective_from
+        )
         return subject
 
     # ------------------------------------------------- GRID-11 восстановление
-    def restore_seed_week(self, week_type: str) -> int:
+    def restore_seed_week(
+        self, week_type: str, *, effective_from: date | str | None = None
+    ) -> int:
         """GRID-11: вернуть строки выбранного типа недели из Прил. А.3.
 
         Оверрайды дат, профили звонков и второй тип недели не затрагиваются;
@@ -280,7 +312,7 @@ class GridService:
                     log.warning("Стартовый предмет %s отсутствует — ячейка пропущена", subject_key)
                     continue
                 entries.append((profile.id, slot_no, subject_id))
-        return self.templates.replace_week(week_type, entries)
+        return self.templates.replace_week(week_type, entries, effective_from=effective_from)
 
     def _seed_subject_id(self, key: str) -> int | None:
         from . import seed_data as seed
@@ -372,7 +404,7 @@ class OverrideService:
         попадал в замкнутый круг.
         """
         subject_id = self.templates.subject_at(
-            profile_id, self.week_type_of(value), slot_no
+            profile_id, self.week_type_of(value), slot_no, on_date=value
         )
         if subject_id is None:
             existing = self.overrides.for_date(value, profile_id=profile_id)
@@ -505,7 +537,9 @@ class OverrideService:
     def can_cancel(self, value: date, profile_id: int, slot_no: int) -> bool:
         """Кнопка «Отменить пару» активна только при занятии по шаблону."""
         return (
-            self.templates.subject_at(profile_id, self.week_type_of(value), slot_no) is not None
+            self.templates.subject_at(
+                profile_id, self.week_type_of(value), slot_no, on_date=value
+            ) is not None
         )
 
 
@@ -754,9 +788,9 @@ class HomeworkService:
         return result
 
     def upcoming(self, *, today: date | None = None) -> list[HomeworkRow]:
-        """HW-05/UI-10: ближайшие задания на сегодня и завтра."""
+        """HW-05/UI-10: задания на текущую и следующую недели (кроме просроченных)."""
         base = today or clock.today()
-        items = self.repo.upcoming(days=2, today=base)
+        items = self.repo.upcoming(today=base)
         names = {item.id: item.name for item in self.subjects.all()}
         return [
             HomeworkRow(

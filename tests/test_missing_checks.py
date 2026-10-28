@@ -30,15 +30,27 @@ def test_acc_m_18_second_replace_same_slot_rejected(db, anchors, simple_bell,
     assert "изменение" in str(excinfo.value).lower() or "оверрайд" in str(excinfo.value).lower()
 
 
-def test_acc_m_18_cancel_then_replace_same_slot_rejected(db, anchors, simple_bell,
-                                                        simple_subjects, templates,
-                                                        overrides) -> None:
+def test_acc_m_18_cancel_then_replace_same_slot_allowed(db, anchors, simple_bell,
+                                                       simple_subjects, templates,
+                                                       overrides) -> None:
+    """OVR-05/SCH-18: замена поверх отмены того же блока разрешена.
+
+    Пользователь убирает пару и сразу ставит другую на её место. Прежний
+    ``cancel`` снимается: в блоке остаётся одна запись — ``replace``.
+    """
     anchors.create(date(2026, 9, 7), date(2026, 9, 7), "lower")
     day = date(2026, 9, 7)
     templates.set_cell(simple_bell.id, "lower", 1, simple_subjects[0].id)
     overrides.create(day, simple_bell.id, 1, "cancel")
-    with pytest.raises(RuleViolationError):
-        overrides.create(day, simple_bell.id, 1, "replace", subject_id=simple_subjects[1].id)
+
+    created = overrides.create(
+        day, simple_bell.id, 1, "replace", subject_id=simple_subjects[1].id
+    )
+    assert created.subject_id == simple_subjects[1].id
+
+    items = overrides.for_date(day)
+    assert len(items) == 1, f"в блоке должна остаться одна запись, а их {len(items)}"
+    assert items[0].subject_id == simple_subjects[1].id
 
 
 def test_acc_m_19_add_into_occupied_slot_rejected(db, anchors, simple_bell,

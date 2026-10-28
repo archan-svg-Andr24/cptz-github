@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Iterable
 
 from . import dates as dt
@@ -928,15 +928,23 @@ class HomeworkRepository:
         sql += " ORDER BY h.due_date, h.id"
         return [_homework(row) for row in self.db.fetchall(sql, tuple(params))]
 
-    def upcoming(self, *, days: int = 2, today: date | None = None) -> list[Homework]:
-        """Виджет «Домашние задания»: на сегодня и завтра (HW-05)."""
+    def upcoming(self, *, today: date | None = None) -> list[Homework]:
+        """Виджет «Домашние задания»: текущая и следующая недели (HW-05).
+
+        Окно — две календарные недели: от сегодняшнего дня до воскресенья
+        следующей недели включительно. Прошедшие дедлайны (просроченные) в
+        виджет не попадают: они видны на странице заданий отдельной группой.
+        """
         from . import clock
 
         base = today or clock.today()
+        # Конец следующей недели: понедельник текущей + 14 дней даёт
+        # понедельник недели после следующей, поэтому берём -1.
+        end = dt.monday_of(base) + timedelta(days=13)
         return [
             item
-            for item in self.filtered()
-            if item.is_active and base <= item.due_date <= dt.add_days(base, days - 1)
+            for item in self.filtered(status="active")
+            if base <= item.due_date <= end
         ]
 
     def for_subject_date(self, subject_id: int, value: date) -> list[Homework]:

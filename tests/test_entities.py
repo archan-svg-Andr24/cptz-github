@@ -66,15 +66,22 @@ def test_acc_m_103_relocation_via_cancel_and_add(db, anchors, simple_bell,
 # ---------------------------------------------------------------------------
 # ACC-M-104 — уникальность тройки (дата, профиль, блок).
 # ---------------------------------------------------------------------------
-def test_acc_m_104_duplicate_override_rejected(db, anchors, simple_bell,
-                                              simple_subjects, templates,
-                                              overrides) -> None:
+def test_acc_m_104_second_replace_same_slot_rejected(db, anchors, simple_bell,
+                                                   simple_subjects, templates,
+                                                   overrides) -> None:
+    """OVR-08: второй ``replace`` на тот же блок — отказ.
+
+    Замена поверх **отмены** разрешена (OVR-05/SCH-18): это путь «убрал пару,
+    поставил другую». Запрет остаётся для двух замен подряд.
+    """
     anchors.create(date(2026, 9, 7), date(2026, 9, 7), "lower")
     day = date(2026, 9, 7)
-    overrides.create(day, simple_bell.id, 1, "cancel")
+    templates.set_cell(simple_bell.id, "lower", 1, simple_subjects[0].id)
+    overrides.create(day, simple_bell.id, 1, "replace",
+                     subject_id=simple_subjects[0].id)
     with pytest.raises(RuleViolationError) as excinfo:
         overrides.create(day, simple_bell.id, 1, "replace",
-                         subject_id=simple_subjects[0].id)
+                         subject_id=simple_subjects[1].id)
     assert "оверрайд" in str(excinfo.value).lower() or "изменение" in str(excinfo.value).lower()
 
 
@@ -336,16 +343,31 @@ def test_homework_filter_by_status(homework_repo_factory, db, simple_subjects) -
 
 
 def test_homework_upcoming_window(homework_repo_factory, db, simple_subjects) -> None:
-    """HW-05: виджет показывает задания на сегодня и завтра."""
+    """HW-05: виджет берёт текущую и следующую календарные недели.
+
+    Сегодня вторник 20.10.2026. Текущая неделя — 19…25 октября, следующая —
+    26 октября…1 ноября. Всё, что попадает в эти дни, показывается; более
+    позднее и просроченное — нет.
+    """
     repo = homework_repo_factory(db)
     subject = simple_subjects[0]
     today = date(2026, 10, 20)
     repo.create(subject.id, today, "Сегодня")
     repo.create(subject.id, date(2026, 10, 21), "Завтра")
-    repo.create(subject.id, date(2026, 10, 25), "Позже")
+    repo.create(subject.id, date(2026, 10, 25), "Конец текущей недели")
+    repo.create(subject.id, date(2026, 10, 26), "Начало следующей")
+    repo.create(subject.id, date(2026, 11, 1), "Конец следующей")
+    repo.create(subject.id, date(2026, 11, 2), "Через две недели")
+    repo.create(subject.id, date(2026, 10, 19), "Вчера — просрочено")
 
     items = repo.upcoming(today=today)
-    assert {item.description for item in items} == {"Сегодня", "Завтра"}
+    assert {item.description for item in items} == {
+        "Сегодня",
+        "Завтра",
+        "Конец текущей недели",
+        "Начало следующей",
+        "Конец следующей",
+    }, "HW-05: окно — две календарные недели, просроченное не попадает"
 
 
 def test_homework_missing_record_raises(homework_repo_factory, db) -> None:

@@ -97,6 +97,122 @@ def test_grid_slot_shows_subject_teacher_room(grid, simple_bell, simple_subjects
     assert "Алгебра" in slot.caption and "Иванова" in slot.caption
 
 
+# ===========================================================================
+# TPL-08 — правка сетки действует с выбранной даты
+# ===========================================================================
+def test_edit_with_date_keeps_past_weeks_unchanged(
+    grid, anchors, simple_bell, simple_subjects, templates
+) -> None:
+    """TPL-08: правка сетки с даты не меняет прошлые недели.
+
+    Раньше шаблон хранил одну строку на позицию, поэтому правка сетки
+    переписывала и прошлые недели: пользователь видел одно и то же
+    расписание на любой дате.
+    """
+    from student_planner.core.day_resolution import DayResolver
+
+    subjects = simple_subjects
+    anchors.create(date(2026, 9, 7), date(2026, 9, 7), "lower")
+    # До правки: блок 1 = «Алгебра» навсегда.
+    templates.set_cell(simple_bell.id, "lower", 1, subjects[0].id)
+
+    past = date(2026, 9, 7)
+    future = date(2026, 9, 21)
+    resolver = DayResolver(grid.db)
+
+    before_past = resolver.resolve(past).lessons[0].subject_name
+    assert before_past == "Алгебра"
+
+    # С 21.09 ставим другой предмет.
+    grid.set_cell(
+        simple_bell.id, "lower", 1, subjects[1].id, effective_from=future
+    )
+
+    assert resolver.resolve(past).lessons[0].subject_name == "Алгебра", (
+        "TPL-08: прошлая неделя должна сохранить прежний предмет"
+    )
+    assert resolver.resolve(future).lessons[0].subject_name == subjects[1].name, (
+        "TPL-08: начиная с даты правки действует новый предмет"
+    )
+
+
+def test_edit_with_date_clears_only_from_that_date(
+    grid, anchors, simple_bell, simple_subjects, templates
+) -> None:
+    """TPL-08: очистка ячейки с даты скрывает пару только в будущем."""
+    from student_planner.core.day_resolution import DayResolver
+
+    anchors.create(date(2026, 9, 7), date(2026, 9, 7), "lower")
+    templates.set_cell(simple_bell.id, "lower", 1, simple_subjects[0].id)
+
+    past = date(2026, 9, 7)
+    future = date(2026, 9, 21)
+    resolver = DayResolver(grid.db)
+
+    grid.clear_cell(simple_bell.id, "lower", 1, effective_from=future)
+
+    assert resolver.resolve(past).lessons, (
+        "TPL-08: прошлая неделя сохраняет занятие после очистки в будущем"
+    )
+    assert not resolver.resolve(future).lessons, (
+        "TPL-08: с даты очистки занятия нет"
+    )
+
+
+def test_template_versions_are_recorded(grid, simple_bell, simple_subjects,
+                                        templates) -> None:
+    """TPL-08: история позиции хранится, а не затирается."""
+    templates.set_cell(simple_bell.id, "lower", 1, simple_subjects[0].id)
+    grid.set_cell(
+        simple_bell.id, "lower", 1, simple_subjects[1].id,
+        effective_from=date(2026, 10, 1),
+    )
+
+    versions = templates.versions(simple_bell.id, "lower", 1)
+    assert len(versions) == 2, f"TPL-08: ожидались две версии, получено {len(versions)}"
+    assert versions[0].subject_id == simple_subjects[0].id
+    assert versions[1].subject_id == simple_subjects[1].id
+    assert versions[1].effective_from == date(2026, 10, 1)
+
+
+def test_grid_view_reads_version_for_date(grid, simple_bell, simple_subjects,
+                                          templates) -> None:
+    """TPL-08: редактор показывает состояние сетки на выбранную дату."""
+    templates.set_cell(simple_bell.id, "lower", 1, simple_subjects[0].id)
+    templates.set_cell(
+        simple_bell.id, "lower", 1, simple_subjects[1].id,
+        effective_from=date(2026, 10, 1),
+    )
+
+    old = grid.view("lower", on_date=date(2026, 9, 15))
+    new = grid.view("lower", on_date=date(2026, 10, 15))
+
+    old_slot = next(c for c in old.columns if c.weekday == 1).slots[0]
+    new_slot = next(c for c in new.columns if c.weekday == 1).slots[0]
+    assert old_slot.subject_name == "Алгебра"
+    assert new_slot.subject_name == simple_subjects[1].name
+
+
+def test_two_week_types_versioned_independently(grid, simple_bell, simple_subjects,
+                                                templates) -> None:
+    """TPL-08: правка нижней недели не трогает верхнюю."""
+    templates.set_cell(simple_bell.id, "upper", 1, simple_subjects[0].id)
+    templates.set_cell(simple_bell.id, "lower", 1, simple_subjects[0].id)
+
+    grid.set_cell(
+        simple_bell.id, "lower", 1, simple_subjects[1].id,
+        effective_from=date(2026, 10, 1),
+    )
+
+    on_later = date(2026, 10, 15)
+    upper = grid.view("upper", on_date=on_later)
+    lower = grid.view("lower", on_date=on_later)
+    upper_slot = next(c for c in upper.columns if c.weekday == 1).slots[0]
+    lower_slot = next(c for c in lower.columns if c.weekday == 1).slots[0]
+    assert upper_slot.subject_name == "Алгебра", "верхняя неделя не изменилась"
+    assert lower_slot.subject_name == simple_subjects[1].name
+
+
 def test_grid_empty_cell_has_no_caption(grid, simple_bell) -> None:
     """GRID-07: при отсутствии предмета ячейка пуста."""
     view = grid.view("lower")
@@ -380,14 +496,47 @@ def test_override_add_into_occupied_slot_rejected(override_service, monday_lower
         override_service.add(monday_lower, simple_bell.id, 1, subject_id=simple_subjects[1].id)
 
 
-def test_override_second_cancel_same_slot_rejected(override_service, monday_lower,
-                                                   simple_bell, simple_subjects) -> None:
-    """OVR-08: не более одного ``cancel``/``replace`` на слот."""
+def test_override_add_into_cancelled_slot_allowed(override_service, monday_lower,
+                                                  simple_bell, simple_subjects) -> None:
+    """OVR-07/SCH-18: отменённый блок считается свободным для добавления.
+
+    Дефект: после отмены пары блок оставался занятым (запись шаблона никуда не
+    делась), поэтому «Добавить» отвечало OVR-08 и поставить другую пару на
+    место отменённой было нельзя. Теперь в блок с ``cancel`` добавлять можно,
+    а прежняя отмена снимается — в блоке остаётся одно занятие.
+    """
+    from student_planner.core.day_resolution import DayResolver
+
     override_service.cancel(monday_lower, simple_bell.id, 1)
-    with pytest.raises(RuleViolationError):
-        override_service.replace(
-            monday_lower, simple_bell.id, 1, subject_id=simple_subjects[1].id
-        )
+
+    created = override_service.add(
+        monday_lower, simple_bell.id, 1, subject_id=simple_subjects[1].id
+    )
+    assert created.subject_id == simple_subjects[1].id
+
+    lessons = DayResolver(override_service.db).resolve(monday_lower).lessons
+    slot = next(item for item in lessons if item.slot_no == 1)
+    assert slot.subject.id == simple_subjects[1].id, (
+        "OVR-07: в отменённый блок ставится новая пара"
+    )
+    assert str(slot.status) != "cancelled", "прежняя отмена снята"
+
+
+def test_override_replace_after_cancel_allowed(override_service, monday_lower,
+                                               simple_bell, simple_subjects) -> None:
+    """OVR-05/SCH-18: замена поверх отмены того же блока разрешена.
+
+    Путь «убрал пару → поставил другую»: прежний ``cancel`` снимается, в
+    блоке остаётся одна запись ``replace``.
+    """
+    override_service.cancel(monday_lower, simple_bell.id, 1)
+    created = override_service.replace(
+        monday_lower, simple_bell.id, 1, subject_id=simple_subjects[1].id
+    )
+    assert created.override_type == OverrideType.REPLACE
+
+    items = override_service.for_date(monday_lower)
+    assert len(items) == 1, "в блоке должна остаться одна запись"
 
 
 def test_override_cancel_after_replace_rejected(override_service, monday_lower,
@@ -781,15 +930,28 @@ def test_homework_done_is_not_overdue(homework, simple_subjects) -> None:
     assert homework.rows(only_overdue=True, today=date(2026, 10, 20)) == []
 
 
-def test_homework_widget_today_and_tomorrow(homework, simple_subjects) -> None:
-    """HW-05: виджет показывает задания на сегодня и завтра."""
+def test_homework_widget_two_weeks(homework, simple_subjects) -> None:
+    """HW-05: виджет показывает текущую и следующую недели, кроме просроченных.
+
+    Сегодня вторник 20.10.2026: окно — 20.10…01.11 включительно.
+    """
     today = date(2026, 10, 20)
     homework.create(simple_subjects[0].id, today, "Сегодня")
     homework.create(simple_subjects[0].id, date(2026, 10, 21), "Завтра")
-    homework.create(simple_subjects[0].id, date(2026, 10, 25), "Позже")
+    homework.create(simple_subjects[0].id, date(2026, 10, 24), "Суббота")
+    homework.create(simple_subjects[0].id, date(2026, 10, 28), "Следующая неделя")
+    homework.create(simple_subjects[0].id, date(2026, 11, 1), "Воскресенье следующей")
+    homework.create(simple_subjects[0].id, date(2026, 11, 2), "Уже вне окна")
+    homework.create(simple_subjects[0].id, date(2026, 10, 19), "Просрочено")
 
     items = homework.upcoming(today=today)
-    assert [item.homework.description for item in items] == ["Сегодня", "Завтра"]
+    assert [item.homework.description for item in items] == [
+        "Сегодня",
+        "Завтра",
+        "Суббота",
+        "Следующая неделя",
+        "Воскресенье следующей",
+    ], "HW-05: порядок по дате сдачи, просроченное исключено"
 
 
 def test_homework_widget_empty_caption(homework, simple_subjects) -> None:

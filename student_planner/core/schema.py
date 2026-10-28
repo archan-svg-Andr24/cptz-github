@@ -176,13 +176,14 @@ _DDL: Final[tuple[str, ...]] = (
     # --- Б.7. Шаблоны расписания -------------------------------------------
     """
     CREATE TABLE schedule_templates (
-      id         INTEGER PRIMARY KEY,
-      profile_id INTEGER NOT NULL REFERENCES bell_profiles(id),
-      week_type  TEXT NOT NULL CHECK (week_type IN ('upper','lower')),
-      slot_no    INTEGER NOT NULL,
-      group_mark INTEGER CHECK (group_mark IN (1, 2)),
-      subject_id INTEGER REFERENCES subjects(id),
-      UNIQUE (profile_id, week_type, slot_no, group_mark)
+      id             INTEGER PRIMARY KEY,
+      profile_id     INTEGER NOT NULL REFERENCES bell_profiles(id),
+      week_type      TEXT NOT NULL CHECK (week_type IN ('upper','lower')),
+      slot_no        INTEGER NOT NULL,
+      group_mark     INTEGER CHECK (group_mark IN (1, 2)),
+      subject_id     INTEGER REFERENCES subjects(id),
+      effective_from TEXT NOT NULL,
+      UNIQUE (profile_id, week_type, slot_no, group_mark, effective_from)
     )
     """,
     # --- Б.8. Разовые изменения расписания ---------------------------------
@@ -305,6 +306,7 @@ _DDL: Final[tuple[str, ...]] = (
 _INDEXES: Final[tuple[str, ...]] = (
     "CREATE INDEX ix_tpl_profile   ON schedule_templates(profile_id, week_type)",
     "CREATE INDEX ix_tpl_subject   ON schedule_templates(subject_id)",
+    "CREATE INDEX ix_tpl_effective ON schedule_templates(profile_id, week_type, effective_from)",
     "CREATE INDEX ix_ovr_date      ON schedule_overrides(date, profile_id)",
     "CREATE INDEX ix_periods_range ON study_periods(date_from, date_to)",
     "CREATE INDEX ix_marks_date    ON calendar_day_marks(date)",

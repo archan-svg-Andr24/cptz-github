@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -78,13 +79,48 @@ def _install_excepthook() -> None:
 
 
 def open_or_create_database():
-    """DATA-18: существующая база проверяется, новая создаётся со стартовым набором."""
+    """DATA-18: существующая база проверяется, новая создаётся со стартовым набором.
+
+    V2-SCHEMA: база предыдущей версии схемы не блокирует запуск. Она
+    сохраняется рядом как резервная копия и создаётся заново со стартовым
+    набором — механизма миграции в MVP нет (§34.1 п. 48).
+
+    Возвращает ``(db, created, backup_path)``: ``backup_path`` заполнен, если
+    база была пересоздана из-за несовпадения версии схемы.
+    """
     path = default_db_path()
     if is_initialized(path):
-        # DATA-19: несовпадение версии схемы — отказ без изменения файла.
-        return open_database(path), False
+        try:
+            # DATA-19: несовпадение версии схемы — отказ без изменения файла.
+            return open_database(path), False, None
+        except SchemaVersionError as error:
+            details = getattr(error, "details", {}) or {}
+            stored = details.get("stored")
+            if stored is None or int(stored) >= SCHEMA_VERSION:
+                # Файл новее приложения или без версии — не трогаем.
+                raise
+            backup = _backup_old_database(path, int(stored))
+            logging.getLogger(__name__).warning(
+                "База версии схемы %s сохранена как %s и создаётся заново",
+                stored, backup.name,
+            )
+            path.unlink()
+            initialize_database(path)
+            return open_database(path), True, backup
     initialize_database(path)
-    return open_database(path), True
+    return open_database(path), True, None
+
+
+def _backup_old_database(path: Path, stored_version: int) -> Path:
+    """V2-SCHEMA: сохранить базу прежней версии рядом с рабочей."""
+    from datetime import datetime
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(
+        f"{path.stem}-schema{stored_version}-{stamp}{path.suffix}.bak"
+    )
+    shutil.copy2(path, backup)
+    return backup
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setOrganizationName(APP_NAME)
 
     try:
-        db, created = open_or_create_database()
+        db, created, backup = open_or_create_database()
     except SchemaVersionError as error:
         # DATA-19, ACC-M-72: файл не изменён, приложение не стартует.
         QMessageBox.critical(
@@ -130,6 +166,15 @@ def main(argv: list[str] | None = None) -> int:
         # FIRST-03…FIRST-15: мастер первого запуска.
         wizard = FirstRunWizard(db)
         wizard.exec()
+    if backup is not None:
+        # V2-SCHEMA: база прежней версии сохранена в резервную копию.
+        QMessageBox.information(
+            None, "База данных обновлена",
+            "Файл базы данных был создан предыдущей версией приложения. "
+            "Он сохранён как резервная копия рядом с рабочей базой, а рабочий "
+            "файл создан заново со стартовым набором.\n\n"
+            f"Резервная копия: {backup}",
+        )
 
     window = MainWindow(db)
     window.show()

@@ -304,7 +304,8 @@ class ReplaceLessonDialog(BaseDialog):
 
     def __init__(self, db, day: date, profile_id: int, slot_no: int,
                  caption: str, parent: QWidget | None = None,
-                 *, override_id: int | None = None) -> None:
+                 *, override_id: int | None = None,
+                 subject_id: int | None = None) -> None:
         super().__init__(parent, "Заменить пару")
         self.db = db
         self.service = OverrideService(db)
@@ -329,12 +330,21 @@ class ReplaceLessonDialog(BaseDialog):
         self.subject_combo.setEditable(True)
         for subject in self.subjects:
             self.subject_combo.addItem(subject.name, subject.id)
+        # OVR-05: открываемся на текущем предмете пары, иначе пользователь
+        # выбирал его заново и не видел, что именно меняет.
+        if subject_id is not None:
+            for index in range(self.subject_combo.count()):
+                if self.subject_combo.itemData(index) == subject_id:
+                    self.subject_combo.setCurrentIndex(index)
+                    break
         form.addRow("Предмет:", self.subject_combo)
 
         self.teacher_edit = QLineEdit()
+        self.teacher_edit.setPlaceholderText("из справочника предмета")
         form.addRow("Преподаватель:", self.teacher_edit)
 
         self.room_edit = QLineEdit()
+        self.room_edit.setPlaceholderText("из справочника предмета")
         form.addRow("Кабинет:", self.room_edit)
 
         self.comment_edit = QLineEdit()
@@ -347,20 +357,30 @@ class ReplaceLessonDialog(BaseDialog):
         self._fill_from_subject()
 
     def _fill_from_subject(self) -> None:
+        """OVR-05: подставить преподавателя и кабинет выбранного предмета.
+
+        Дефект: значения подставлялись только в пустые поля (``if not ...``),
+        поэтому при смене предмета оставались данные прежнего — заменённая
+        пара получала чужого преподавателя. Теперь поля заполняются заново
+        при каждом выборе, но остаются редактируемыми: разовые отличия
+        (другой преподаватель, другая аудитория) допустимы.
+        """
         index = self.subject_combo.currentIndex()
         if 0 <= index < len(self.subjects):
             subject = self.subjects[index]
-            if not self.teacher_edit.text().strip() and subject.teacher:
-                self.teacher_edit.setText(subject.teacher)
-            if not self.room_edit.text().strip() and subject.room:
-                self.room_edit.setText(subject.room)
+            self.teacher_edit.setText(subject.teacher or "")
+            self.room_edit.setText(subject.room or "")
 
     def apply(self) -> bool:
         subject_id = self.subject_combo.currentData()
         if subject_id is None:
             raise AppError("Выберите предмет для замены (OVR-05).")
-        teacher = self.teacher_edit.text().strip() or None
-        room = self.room_edit.text().strip() or None
+        # OVR-05: незаполненное поле — не «нет данных», а «как в справочнике».
+        # Иначе стёртый преподаватель сохранялся бы как отсутствие и карточка
+        # теряла бы данные, уже внесённые при создании предмета.
+        chosen = next((s for s in self.subjects if s.id == subject_id), None)
+        teacher = self.teacher_edit.text().strip() or (chosen.teacher if chosen else None)
+        room = self.room_edit.text().strip() or (chosen.room if chosen else None)
         comment = self.comment_edit.text().strip() or None
         if self.override_id is not None:
             # OVR-09: правим блок целиком, тип изменения сохраняется.
@@ -386,10 +406,11 @@ class ReplaceLessonDialog(BaseDialog):
 # OVR-07 — добавление пары
 # ===========================================================================
 class AddLessonDialog(BaseDialog):
-    """Добавление занятия в свободный слот."""
+    """Добавление занятия: блок выбирается вручную, свободные видны (OVR-07)."""
 
     def __init__(self, db, day: date, profile_id: int, slot_no: int,
-                 caption: str, parent: QWidget | None = None) -> None:
+                 caption: str, parent: QWidget | None = None,
+                 *, slots: list[tuple[int, str, bool]] | None = None) -> None:
         super().__init__(parent, "Добавить занятие")
         self.db = db
         self.service = OverrideService(db)
@@ -398,9 +419,9 @@ class AddLessonDialog(BaseDialog):
         self.slot_no = slot_no
         self._error_label = self.error_label()
 
-        info = QLabel(f"{format_display(day)}, блок {slot_no}: {caption}")
-        info.setWordWrap(True)
-        self.add_widget(info)
+        self.info = QLabel(f"{format_display(day)}, блок {slot_no}: {caption}")
+        self.info.setWordWrap(True)
+        self.add_widget(self.info)
 
         from ..core.repositories import SubjectRepository
 
@@ -408,27 +429,65 @@ class AddLessonDialog(BaseDialog):
 
         form = QFormLayout()
         form.setSpacing(8)
+
+        # OVR-07/UI: блок выбирается явно — иначе «Добавить» всегда ставило
+        # занятие после последней пары, и вставить первую было невозможно.
+        self.slot_combo = QComboBox()
+        for number, text, busy in (slots or [(slot_no, caption, False)]):
+            mark = "занят — заменить" if busy else "свободен"
+            self.slot_combo.addItem(f"Блок {number} — {text} ({mark})", number)
+        self.slot_combo.setCurrentIndex(
+            max(0, [self.slot_combo.itemData(i) for i in range(self.slot_combo.count())]
+                .index(slot_no)) if self.slot_combo.count() else 0
+        )
+        self.slot_combo.currentIndexChanged.connect(self._on_slot_changed)
+        form.addRow("Блок:", self.slot_combo)
+
         self.subject_combo = QComboBox()
         for subject in self.subjects:
             self.subject_combo.addItem(subject.name, subject.id)
         form.addRow("Предмет:", self.subject_combo)
 
         self.teacher_edit = QLineEdit()
+        self.teacher_edit.setPlaceholderText("из справочника предмета")
         form.addRow("Преподаватель:", self.teacher_edit)
         self.room_edit = QLineEdit()
+        self.room_edit.setPlaceholderText("из справочника предмета")
         form.addRow("Кабинет:", self.room_edit)
         self.add_form(form)
         self.finish("Добавить")
+
+        # OVR-07: предмет, преподаватель и кабинет уже введены в справочнике
+        # «Настройки → Предметы» — подставляем их, а не заставляем набирать.
+        self.subject_combo.currentIndexChanged.connect(self._fill_from_subject)
+        self._fill_from_subject()
+
+    def _fill_from_subject(self) -> None:
+        index = self.subject_combo.currentIndex()
+        if 0 <= index < len(self.subjects):
+            subject = self.subjects[index]
+            if subject.teacher:
+                self.teacher_edit.setText(subject.teacher)
+            if subject.room:
+                self.room_edit.setText(subject.room)
+
+    def _on_slot_changed(self) -> None:
+        number = self.slot_combo.currentData()
+        if number is not None:
+            self.slot_no = int(number)
 
     def apply(self) -> bool:
         subject_id = self.subject_combo.currentData()
         if subject_id is None:
             raise AppError("Выберите предмет (OVR-07).")
+        self._on_slot_changed()
+        # OVR-07: пустое поле означает «как в справочнике предмета».
+        chosen = next((s for s in self.subjects if s.id == subject_id), None)
         self.service.add(
             self.day, self.profile_id, self.slot_no,
             subject_id=subject_id,
-            teacher=self.teacher_edit.text().strip() or None,
-            room=self.room_edit.text().strip() or None,
+            teacher=self.teacher_edit.text().strip() or (chosen.teacher if chosen else None),
+            room=self.room_edit.text().strip() or (chosen.room if chosen else None),
         )
         return True
 

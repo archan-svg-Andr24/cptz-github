@@ -163,7 +163,7 @@ class SettingSpec:
 #: Реестр §30 целиком. Порядок внутри разделов — порядок отображения.
 _REGISTRY: tuple[SettingSpec, ...] = (
     SettingSpec(
-        SettingsKeys.SCHEMA_VERSION, SettingType.READONLY_INT, "1", UiSection.NONE,
+        SettingsKeys.SCHEMA_VERSION, SettingType.READONLY_INT, "2", UiSection.NONE,
         "Версия схемы", visible=False, readonly=True,
         hint="Служебный ключ (DATA-19). Только чтение.",
     ),

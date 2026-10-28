@@ -328,8 +328,8 @@ def test_data_15_foreign_key_violation_rejected(db: Database) -> None:
     with pytest.raises(Exception):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id) "
-                "VALUES (999, 'lower', 1, NULL)"
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, effective_from) "
+                "VALUES (999, 'lower', 1, NULL, '0001-01-01')"
             )
 
 

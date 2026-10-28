@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core import clock
+from ...core.day_resolution import DayResolver
 from ...core.dates import format_display
 from ...core.errors import AppError
 from ...core.paths import appdata_dir, default_db_path, resolve_db_path
@@ -155,7 +156,7 @@ class GeneralTab(QWidget):
 
 
 class WeeksTab(QWidget):
-    """SET-03: действующий якорь и исторические якоря (WEEK-08)."""
+    """SET-03: действующий якорь, исторические якоря (WEEK-08) и сетка недели."""
 
     changed = Signal()
 
@@ -167,6 +168,29 @@ class WeeksTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 10, 0, 0)
         layout.setSpacing(10)
+
+        # ------------------------------------------------------- сетка недели
+        # GRID-01: тот же редактор, что и на странице «Расписание», вызванный
+        # из настроек — расписание правится в любой момент, без перехода.
+        grid_card = Card("Расписание недели")
+        grid_hint = QLabel(
+            "Предметы по дням и парам задаются в редакторе недельной сетки. "
+            "Выбор сохраняется сразу по ячейке, общего «Сохранить» нет (GRID-02); "
+            "очистка убирает только ячейку, слоты и звонки остаются (GRID-05)."
+        )
+        grid_hint.setObjectName("Small")
+        grid_hint.setWordWrap(True)
+        grid_card.add_widget(grid_hint)
+
+        grid_row = QHBoxLayout()
+        grid_row.setSpacing(8)
+        self.grid_button = QPushButton("Редактировать сетку недели…")
+        self.grid_button.setObjectName("Primary")
+        self.grid_button.clicked.connect(self.open_grid_editor)
+        grid_row.addWidget(self.grid_button)
+        grid_row.addStretch(1)
+        grid_card.add_layout(grid_row)
+        layout.addWidget(grid_card)
 
         card = Card("Действующий якорь")
         form = QFormLayout()
@@ -245,6 +269,24 @@ class WeeksTab(QWidget):
             if index >= 0:
                 self.type_combo.setCurrentIndex(index)
             self.cycle_label.setText(str(current.cycle_length))
+
+    def open_grid_editor(self) -> None:
+        """GRID-01: открыть редактор недельной сетки из настроек.
+
+        Используется тот же диалог, что и на странице «Расписание»: одна
+        реализация, один способ сохранения (по ячейке). После закрытия
+        передаётся ``changed``, чтобы страница расписания перерисовалась.
+        """
+        from ..grid_editor import GridEditorDialog
+
+        try:
+            week_type = DayResolver(self.db).week_type(clock.today()) or "lower"
+        except AppError:  # pragma: no cover - защита интерфейса
+            week_type = "lower"
+        dialog = GridEditorDialog(self.db, clock.today(), self)
+        if dialog.exec():
+            self.changed.emit()
+            self.refresh()
 
     def create_anchor(self) -> None:
         effective = self.effective_edit.date()
@@ -833,8 +875,292 @@ class DataTab(QWidget):
         self.message.setVisible(True)
 
 
+class SubjectDialog(BaseDialog):
+    """SUBJ-01/SUBJ-04: создание и правка предмета справочника."""
+
+    def __init__(self, db, parent: QWidget | None = None, subject=None) -> None:
+        super().__init__(parent, "Предмет")
+        self.subjects = SubjectRepository(db)
+        self.subject = subject
+        self._error_label = self.error_label()
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Компьютерные сети")
+        if subject is not None:
+            self.name_edit.setText(subject.name)
+        form.addRow("Название:", self.name_edit)
+
+        self.code_edit = QLineEdit()
+        self.code_edit.setPlaceholderText("МДК.01.02")
+        if subject is not None:
+            self.code_edit.setText(subject.code or "")
+        form.addRow("Код:", self.code_edit)
+
+        self.teacher_edit = QLineEdit()
+        self.teacher_edit.setPlaceholderText("Ветрова К.В.")
+        if subject is not None:
+            self.teacher_edit.setText(subject.teacher or "")
+        form.addRow("Преподаватель:", self.teacher_edit)
+
+        self.room_edit = QLineEdit()
+        self.room_edit.setPlaceholderText("Каб. №44")
+        if subject is not None:
+            self.room_edit.setText(subject.room or "")
+        form.addRow("Кабинет:", self.room_edit)
+        self.add_form(form)
+
+        hint = QLabel(
+            "Название обязательно, остальное — по желанию. Пара «код + название» "
+            "не может повторяться (SUBJ-02); одинаковый код у разных предметов "
+            "допустим."
+        )
+        hint.setObjectName("Small")
+        hint.setWordWrap(True)
+        self.add_widget(hint)
+
+        self.finish("Сохранить")
+
+    def apply(self) -> bool:
+        name = self.name_edit.text().strip()
+        if not name:
+            raise AppError("Название предмета не может быть пустым (SUBJ-01).")
+        code = self.code_edit.text().strip() or None
+        teacher = self.teacher_edit.text().strip() or None
+        room = self.room_edit.text().strip() or None
+
+        if self.subject is None:
+            self.subjects.create(name, code=code, teacher=teacher, room=room)
+        else:
+            self.subjects.update(
+                self.subject.id, name=name, code=code, teacher=teacher, room=room
+            )
+        return True
+
+
+class SubjectsTab(QWidget):
+    """SUBJ-04: справочник предметов — просмотр, добавление, правка, отключение."""
+
+    changed = Signal()
+
+    def __init__(self, db, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.db = db
+        self.subjects = SubjectRepository(db)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 10, 0, 0)
+        layout.setSpacing(10)
+
+        hint = QLabel(
+            "Предметы используются в расписании и домашних заданиях (SUBJ-03). "
+            "Используемый предмет удалить нельзя — его можно отключить: он "
+            "перестанет предлагаться в списках, но останется в прошлых записях "
+            "(SUBJ-04)."
+        )
+        hint.setObjectName("Small")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["Название", "Преподаватель", "Кабинет", "Код", "Активен"]
+        )
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection
+        )
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.doubleClicked.connect(lambda _index: self.edit_subject())
+        layout.addWidget(self.table, 1)
+
+        # Сообщение и пустое состояние идут до кнопок: под ними они уходили
+        # за нижнюю границу вкладки, когда таблица занимала всю высоту.
+        self.empty_label = QLabel("Предметов нет — добавьте первый кнопкой «Добавить»")
+        self.empty_label.setObjectName("Empty")
+        self.empty_label.setVisible(False)
+        layout.addWidget(self.empty_label)
+
+        self.message = QLabel()
+        self.message.setObjectName("Small")
+        self.message.setWordWrap(True)
+        self.message.setVisible(False)
+        layout.addWidget(self.message)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+
+        self.add_button = QPushButton("Добавить")
+        self.add_button.setObjectName("Primary")
+        self.add_button.clicked.connect(self.add_subject)
+        buttons.addWidget(self.add_button)
+
+        self.edit_button = QPushButton("Изменить")
+        self.edit_button.clicked.connect(self.edit_subject)
+        self.edit_button.setEnabled(False)
+        buttons.addWidget(self.edit_button)
+
+        self.toggle_button = QPushButton("Отключить")
+        self.toggle_button.clicked.connect(self.toggle_subject)
+        self.toggle_button.setEnabled(False)
+        buttons.addWidget(self.toggle_button)
+
+        self.delete_button = QPushButton("Удалить")
+        self.delete_button.clicked.connect(self.delete_subject)
+        self.delete_button.setEnabled(False)
+        buttons.addWidget(self.delete_button)
+
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+    # ------------------------------------------------------------------ данные
+    def refresh(self) -> None:
+        subjects = self.subjects.all()
+        self.table.setRowCount(len(subjects))
+        for row, subject in enumerate(subjects):
+            self.table.setItem(row, 0, QTableWidgetItem(subject.name))
+            self.table.setItem(row, 1, QTableWidgetItem(subject.teacher or "—"))
+            self.table.setItem(row, 2, QTableWidgetItem(subject.room or "—"))
+            self.table.setItem(row, 3, QTableWidgetItem(subject.code or "—"))
+            state = "да" if subject.is_active else "нет"
+            self.table.setItem(row, 4, QTableWidgetItem(state))
+            # Идентификатор хранится в первой ячейке строки.
+            self.table.item(row, 0).setData(
+                Qt.ItemDataRole.UserRole, subject.id
+            )
+            if not subject.is_active:
+                for column in range(self.table.columnCount()):
+                    item = self.table.item(row, column)
+                    if item is not None:
+                        item.setForeground(Qt.GlobalColor.darkGray)
+
+        self.empty_label.setVisible(not subjects)
+        self._on_selection_changed()
+
+    def selected_subject(self):
+        """Предмет из выделенной строки таблицы или ``None``."""
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        if item is None:
+            return None
+        subject_id = item.data(Qt.ItemDataRole.UserRole)
+        if subject_id is None:
+            return None
+        return self.subjects.by_id(int(subject_id))
+
+    def _on_selection_changed(self) -> None:
+        subject = self.selected_subject()
+        self.edit_button.setEnabled(subject is not None)
+        self.delete_button.setEnabled(subject is not None)
+        self.toggle_button.setEnabled(subject is not None)
+        if subject is None:
+            self.toggle_button.setText("Отключить")
+        else:
+            self.toggle_button.setText(
+                "Включить" if not subject.is_active else "Отключить"
+            )
+
+    # ------------------------------------------------------------------ запись
+    def add_subject(self) -> None:
+        dialog = SubjectDialog(self.db, self)
+        if dialog.exec():
+            self.refresh()
+            self._notify("Предмет добавлен")
+            self.changed.emit()
+
+    def edit_subject(self) -> None:
+        subject = self.selected_subject()
+        if subject is None:
+            return
+        dialog = SubjectDialog(self.db, self, subject=subject)
+        if dialog.exec():
+            self.refresh()
+            self._notify("Изменения сохранены")
+            self.changed.emit()
+
+    def toggle_subject(self) -> None:
+        """SUBJ-04: отключение вместо удаления используемого предмета."""
+        subject = self.selected_subject()
+        if subject is None:
+            return
+        try:
+            self.subjects.set_active(subject.id, not subject.is_active)
+        except AppError as error:
+            self._notify(error.message, error=True)
+            return
+        self.refresh()
+        self._notify("Предмет включён" if not subject.is_active else "Предмет отключён")
+        self.changed.emit()
+
+    def delete_subject(self) -> None:
+        """SUBJ-04: удаление разрешено, только если предмет нигде не используется.
+
+        Если предмет уже стоит в расписании, предлагается не ошибка, а выбор:
+        отключить его или отказаться (SUBJ-04, HW-09).
+        """
+        subject = self.selected_subject()
+        if subject is None:
+            return
+
+        references = self.subjects.references(subject.id)
+        if references:
+            answer = QMessageBox.question(
+                self,
+                "Предмет используется",
+                f"«{subject.name}» используется: {references}.\n\n"
+                "Удалить его нельзя, потому что он останется в прошлых записях. "
+                "Отключить предмет? Он перестанет предлагаться в списках, но "
+                "расписание и задания сохранятся (SUBJ-04).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.subjects.set_active(subject.id, False)
+                self.refresh()
+                self._notify("Предмет отключён")
+                self.changed.emit()
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Удалить предмет",
+            f"Удалить предмет «{subject.name}»? Он нигде не используется, поэтому "
+            "удаление безопасно.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.subjects.delete(subject.id)
+        except AppError as error:
+            self._notify(error.message, error=True)
+            return
+        self.refresh()
+        self._notify("Предмет удалён")
+        self.changed.emit()
+
+    def _notify(self, text: str, *, error: bool = False) -> None:
+        self.message.setText(text)
+        self.message.setStyleSheet(
+            f"color: {COLORS['error']};" if error else f"color: {COLORS['success']};"
+        )
+        self.message.setVisible(True)
+
+
 class SettingsPage(QWidget):
-    """SET-01: разделы Общие, Недели, Звонки, Транспорт, Календарь, Данные."""
+    """SET-01: разделы Общие, Предметы, Недели, Звонки, Транспорт, Календарь, Данные."""
 
     changed = Signal()
 
@@ -850,18 +1176,20 @@ class SettingsPage(QWidget):
 
         self.tabs = QTabWidget()
         self.general_tab = GeneralTab(db)
+        self.subjects_tab = SubjectsTab(db)
         self.weeks_tab = WeeksTab(db)
         self.bells_tab = BellsTab(db)
         self.transport_tab = TransportTab(db)
         self.calendar_tab = CalendarTab(db)
         self.data_tab = DataTab(db)
 
-        for tab in (self.general_tab, self.weeks_tab, self.transport_tab,
-                    self.calendar_tab, self.data_tab):
+        for tab in (self.general_tab, self.subjects_tab, self.weeks_tab,
+                    self.transport_tab, self.calendar_tab, self.data_tab):
             tab.changed.connect(self._on_changed)
 
         for tab, caption in (
             (self.general_tab, "Общие"),
+            (self.subjects_tab, "Предметы"),
             (self.weeks_tab, "Недели"),
             (self.bells_tab, "Звонки"),
             (self.transport_tab, "Транспорт"),
@@ -872,8 +1200,9 @@ class SettingsPage(QWidget):
         layout.addWidget(self.tabs, 1)
 
     def refresh(self) -> None:
-        for tab in (self.general_tab, self.weeks_tab, self.bells_tab,
-                    self.transport_tab, self.calendar_tab, self.data_tab):
+        for tab in (self.general_tab, self.subjects_tab, self.weeks_tab,
+                    self.bells_tab, self.transport_tab, self.calendar_tab,
+                    self.data_tab):
             tab.refresh()
 
     def _on_changed(self) -> None:

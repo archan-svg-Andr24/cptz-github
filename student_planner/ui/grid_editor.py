@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QHBoxLayout,
@@ -38,6 +39,9 @@ from .theme import COLORS, stylesheet
 from .widgets import Badge
 
 log = logging.getLogger(__name__)
+
+#: Маркер «набранный текст не соответствует ни одному предмету».
+_UNRESOLVED = object()
 
 
 class SubjectCellWidget(QWidget):
@@ -68,6 +72,9 @@ class SubjectCellWidget(QWidget):
 
         self.combo.activated.connect(self._on_activated)
         self.combo.lineEdit().editingFinished.connect(self._on_activated)
+        # Выбор из раскрывающегося списка автодополнения не порождает
+        # ``comboBox.activated`` — сигнал приходит только от completer.
+        completer.activated.connect(self._on_completer_activated)
         layout.addWidget(self.combo, 1)
 
         self.clear_button = QPushButton("✕")
@@ -80,11 +87,49 @@ class SubjectCellWidget(QWidget):
 
         self._on_change = on_change
         self._current_id = current_id
+        # Пары «имя предмета → id»: в поле пользователь набирает имя без
+        # преподавателя, а в списке подпись склеена как «Имя — Преподаватель».
+        self._by_name = {subject.name.strip(): subject.id for subject in subjects}
+
+    def _subject_from_text(self):
+        """Определить предмет по тому, что набрано в поле (GRID-02).
+
+        ``combo.currentData()`` возвращает данные по текущему *индексу*, а не по
+        набранному тексту: при ручном вводе индекс остаётся прежним, и выбор
+        терялся. Поэтому предмет ищется по тексту, а несовпадение возвращает
+        ``_UNRESOLVED`` — тогда подпись восстанавливается, и ячейка не меняется.
+        """
+        text = self.combo.currentText().strip()
+        if not text:
+            return None
+        index = self.combo.findText(text, Qt.MatchFlag.MatchFixedString)
+        if index >= 0:
+            return self.combo.itemData(index)
+        # Набрано имя без преподавателя — так пользователь и печатает.
+        if text in self._by_name:
+            return self._by_name[text]
+        # Регистр не важен: сравниваем без учёта регистра.
+        lowered = text.casefold()
+        for name, subject_id in self._by_name.items():
+            if name.casefold() == lowered:
+                return subject_id
+        return _UNRESOLVED
+
+    def _on_completer_activated(self, text: str) -> None:
+        index = self.combo.findText(text, Qt.MatchFlag.MatchFixedString)
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+        self._on_activated()
 
     def _on_activated(self) -> None:
         if self._blocked:
             return
-        value = self.combo.currentData()
+        value = self._subject_from_text()
+        if value is _UNRESOLVED:
+            # Набран фрагмент, не совпавший с предметом: возвращаем подпись,
+            # чтобы в ячейке не остался текст, не соответствующий БД.
+            self.set_subject(self._current_id)
+            return
         if value == self._current_id:
             return
         self._current_id = value
@@ -117,6 +162,8 @@ class GridEditorDialog(BaseDialog):
         except AppError:  # pragma: no cover - защита интерфейса
             week_type = "lower"
         self._week_type = week_type
+        # TPL-08: правка действует с выбранной даты; по умолчанию — сегодня.
+        self._effective_from: date = day
 
         # --------------------------------------------------------- заголовок
         top = QHBoxLayout()
@@ -136,6 +183,20 @@ class GridEditorDialog(BaseDialog):
 
         top.addStretch(1)
 
+        # TPL-08: дата, с которой действует правка.
+        top.addWidget(QLabel("Действует с:"))
+        self.effective_edit = QDateEdit()
+        self.effective_edit.setCalendarPopup(True)
+        self.effective_edit.setDisplayFormat("dd.MM.yyyy")
+        self.effective_edit.setDate(QDate(self._effective_from.year, self._effective_from.month,
+                                          self._effective_from.day))
+        self.effective_edit.setToolTip(
+            "Правки сетки действуют с этой даты. Прошлые недели сохраняют "
+            "прежнее расписание (TPL-08)."
+        )
+        self.effective_edit.dateChanged.connect(self._on_effective_changed)
+        top.addWidget(self.effective_edit)
+
         self.restore_button = QPushButton("Вернуть стартовый набор недели")
         self.restore_button.clicked.connect(self.restore_seed)
         top.addWidget(self.restore_button)
@@ -143,7 +204,9 @@ class GridEditorDialog(BaseDialog):
 
         hint = QLabel(
             "Выбор предмета сохраняется сразу, общего «Сохранить» нет (GRID-02). "
-            "Очистка удаляет только ячейку: слоты и время остаются (GRID-05)."
+            "Очистка убирает пару с выбранной даты, слоты и время остаются "
+            "(GRID-05). Прошлые недели не меняются: правка действует с даты "
+            "«Действует с» (TPL-08)."
         )
         hint.setObjectName("Small")
         hint.setWordWrap(True)
@@ -177,9 +240,14 @@ class GridEditorDialog(BaseDialog):
         self._week_type = week_type
         self.refresh()
 
+    def _on_effective_changed(self, value: QDate) -> None:
+        """TPL-08: показываем состояние сетки на выбранную дату."""
+        self._effective_from = date(value.year(), value.month(), value.day())
+        self.refresh()
+
     def refresh(self) -> None:
         self._sync_week_buttons()
-        view = self.service.view(self._week_type)
+        view = self.service.view(self._week_type, on_date=self._effective_from)
         subjects = self.service.subjects_for_cell()
 
         self.table.clear()
@@ -253,7 +321,10 @@ class GridEditorDialog(BaseDialog):
     # ------------------------------------------------------------------ запись
     def save_cell(self, profile_id: int, slot_no: int, subject_id) -> None:
         try:
-            self.service.set_cell(profile_id, self._week_type, slot_no, subject_id)
+            self.service.set_cell(
+            profile_id, self._week_type, slot_no, subject_id,
+            effective_from=self._effective_from,
+        )
         except AppError as error:
             log.info("Ячейка не сохранена: %s", error)
             self.show_error(error)
@@ -263,7 +334,10 @@ class GridEditorDialog(BaseDialog):
 
     def clear_cell(self, profile_id: int, slot_no: int, row: int, column: int) -> None:
         try:
-            self.service.clear_cell(profile_id, self._week_type, slot_no)
+            self.service.clear_cell(
+            profile_id, self._week_type, slot_no,
+            effective_from=self._effective_from,
+        )
         except AppError as error:
             self.show_error(error)
             return
@@ -284,7 +358,9 @@ class GridEditorDialog(BaseDialog):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        restored = self.service.restore_seed_week(self._week_type)
+        restored = self.service.restore_seed_week(
+            self._week_type, effective_from=self._effective_from
+        )
         log.info("Восстановлено ячеек: %d", restored)
         self.refresh()
 

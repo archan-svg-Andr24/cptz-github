@@ -105,12 +105,13 @@ def _make_db_with_version(tmp_path: Path, version: str) -> Path:
 
 
 def test_acc_m_71_schema_version_above_known_refuses_start(tmp_path: Path) -> None:
-    path = _make_db_with_version(tmp_path, "2")
+    newer = str(SCHEMA_VERSION + 1)
+    path = _make_db_with_version(tmp_path, newer)
     before = path.read_bytes()
 
     with pytest.raises(SchemaVersionError) as excinfo:
         open_database(path)
-    assert "2" in str(excinfo.value)
+    assert newer in str(excinfo.value)
     assert "не изменяло" in str(excinfo.value)
     assert path.read_bytes() == before, "Файл БД не должен изменяться при отказе (DATA-19)"
 
@@ -243,13 +244,13 @@ def test_acc_m_100_transaction_rolls_back_entirely(db: Database, subjects, bells
     with pytest.raises(RuntimeError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-                "VALUES (?, 'lower', 1, NULL, ?)",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
+                "effective_from) VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-                "VALUES (?, 'lower', 2, NULL, ?)",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
+                "effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
             raise RuntimeError("принудительная ошибка в середине записи")
@@ -264,14 +265,14 @@ def test_nested_transaction_is_atomic(db: Database, subjects, bells) -> None:
     profile = bells.create_profile(1, "Понедельник")
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-            "VALUES (?, 'lower', 1, NULL, ?)",
+            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, effective_from) "
+            "VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
             (profile.id, subject.id),
         )
         with db.transaction() as inner:
             inner.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-                "VALUES (?, 'lower', 2, NULL, ?)",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
+                "effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
         # Внутренняя транзакция не коммитит сама по себе.
@@ -285,14 +286,14 @@ def test_nested_transaction_rollback_on_error(db: Database, subjects, bells) -> 
     with pytest.raises(ValueError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-                "VALUES (?, 'lower', 1, NULL, ?)",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
+                "effective_from) VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
             with db.transaction() as inner:
                 inner.execute(
                     "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id) VALUES (?, 'lower', 2, NULL, ?)",
+                    "subject_id, effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
                     (profile.id, subject.id),
                 )
                 raise ValueError("ошибка внутри вложенной транзакции")
@@ -309,15 +310,15 @@ def test_inner_rollback_keeps_outer_committed(db: Database, subjects, bells) -> 
     profile = bells.create_profile(1, "Понедельник")
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-            "VALUES (?, 'lower', 1, NULL, ?)",
+            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, effective_from) "
+            "VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
             (profile.id, subject.id),
         )
         try:
             with db.transaction() as inner:
                 inner.execute(
                     "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id) VALUES (?, 'lower', 2, NULL, ?)",
+                    "subject_id, effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
                     (profile.id, subject.id),
                 )
                 raise ValueError("внутренняя операция не удалась")
@@ -395,8 +396,8 @@ def test_foreign_keys_prevent_dangling_references(db: Database) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id) "
-                "VALUES (999, 'lower', 1, NULL, NULL)"
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, effective_from) "
+                "VALUES (999, 'lower', 1, NULL, NULL, '0001-01-01')"
             )
 
 

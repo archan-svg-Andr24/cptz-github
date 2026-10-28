@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import pytest
 
+from student_planner import SCHEMA_VERSION
 from student_planner.core.day_resolution import DayResolver
 from student_planner.core.models import PaymentMethod, TransportType
 from student_planner.core.repositories import (
@@ -423,7 +424,7 @@ def test_acc_s_19_threshold_reached_within_one_period(seeded) -> None:
 # ---------------------------------------------------------------------------
 def test_acc_s_07_defaults_match_appendix(seeded) -> None:
     settings = SettingsService(seeded)
-    assert settings.get_int(SettingsKeys.SCHEMA_VERSION) == 1
+    assert settings.get_int(SettingsKeys.SCHEMA_VERSION) == SCHEMA_VERSION
     assert settings.strelka_period_days() == 30
     assert settings.strelka_first_limit() == 35
     assert settings.get_int(SettingsKeys.STRELKA_LOW_BALANCE_WARN) == 2
