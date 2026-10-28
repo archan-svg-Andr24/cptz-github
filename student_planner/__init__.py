@@ -15,7 +15,7 @@ from __future__ import annotations
 
 APP_NAME = "StudentPlanner"
 APP_TITLE = "Студенческий органайзер"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 #: Версия схемы БД, известная приложению (DATA-19, Прил. Б).
 SCHEMA_VERSION = 2
