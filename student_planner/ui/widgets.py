@@ -152,9 +152,10 @@ class SectionHeader(QWidget):
         texts.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignTop)
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("Muted")
-        self.subtitle_label.setVisible(bool(subtitle))
         self.subtitle_label.setWordWrap(True)
         texts.addWidget(self.subtitle_label, 0, Qt.AlignmentFlag.AlignTop)
+        # UI-27: видимость — после добавления в раскладку (см. EmptyState).
+        self.subtitle_label.setVisible(bool(subtitle))
         layout.addLayout(texts, 0)
         layout.addStretch(1)
 
@@ -221,18 +222,21 @@ class EmptyState(QWidget):
         self.hint_label = QLabel(hint)
         self.hint_label.setObjectName("Small")
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hint_label.setVisible(bool(hint))
         self.hint_label.setWordWrap(True)
         layout.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignCenter)
+        # UI-27: видимость — после добавления в раскладку. Кнопка без
+        # родителя является самостоятельным окном, и setVisible(True) до
+        # addWidget показывало её отдельным окном на один кадр.
+        self.hint_label.setVisible(bool(hint))
 
         self.action_button = QPushButton(action_text)
         self.action_button.setObjectName("Primary")
-        self.action_button.setVisible(bool(action_text))
         self.action_button.clicked.connect(self.action_clicked)
         holder = QHBoxLayout()
         holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         holder.addWidget(self.action_button)
         layout.addLayout(holder)
+        self.action_button.setVisible(bool(action_text))
 
     def set_caption(self, text: str) -> None:
         self.caption_label.setText(text)

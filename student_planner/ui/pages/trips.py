@@ -463,6 +463,9 @@ class TemplateDialog(BaseDialog):
             return
         self._legs.remove(row)
         self.legs_layout.removeWidget(row)
+        # UI-26: hide() до setParent(None) — единое правило для всех списков:
+        # отцеплённый виджет не должен быть видимым ни одного кадра.
+        row.hide()
         row.setParent(None)
         row.deleteLater()
         self._renumber()
@@ -682,6 +685,10 @@ class ConfirmTab(QWidget):
             item = self.rides_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # UI-26: без hide()+setParent(None) снятая строка остаётся
+                # видимой до отложенного deleteLater и рисуется поверх новой.
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         if rides:

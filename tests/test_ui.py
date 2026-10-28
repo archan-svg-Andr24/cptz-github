@@ -1053,8 +1053,160 @@ class TestScheduleCalendarSync:
 # ===========================================================================
 # §24 — страница «Расписание»
 # ===========================================================================
+class TestNoGhostWidgets:
+    """UI-26: снятые из раскладки виджеты не остаются видимыми.
+
+    ``deleteLater()`` отложен до возврата в цикл событий, а виджет, снятый
+    через ``takeAt()``, сохраняет родителя и продолжает рисоваться поверх
+    новых строк. Симптом — мигающие «свёрнутые окна» при обновлении списка.
+    """
+
+    def test_building_cards_creates_no_stray_windows(self, seeded):
+        """UI-27: карточки занятий не создают отдельных окон при сборке.
+
+        Дефект из отчёта: при переключении дней на несколько секунд
+        появлялись и закрывались «свёрнутые окна». Это кнопки карточки:
+        раскладка действий создаётся без родителя (``QVBoxLayout()``), и
+        ``addWidget()`` такой раскладке родителя виджету НЕ назначает.
+        Кнопка остаётся самостоятельным окном, а следующий за добавлением
+        ``setVisible(True)`` показывает её отдельным окном на один кадр.
+        Карточек на дне несколько — вспышки шли пачками.
+        """
+        from PySide6.QtCore import QObject, QEvent
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        from student_planner.ui.pages.schedule import SchedulePage
+
+        app = QApplication.instance() or QApplication([])
+
+        class Spy(QObject):
+            def __init__(self) -> None:
+                super().__init__()
+                self.windows: list[str] = []
+
+            def eventFilter(self, obj, event) -> bool:
+                if (event.type() == QEvent.Type.Show
+                        and isinstance(obj, QWidget) and obj.isWindow()):
+                    self.windows.append(type(obj).__name__)
+                return False
+
+        spy = Spy()
+        app.installEventFilter(spy)
+
+        page = SchedulePage(seeded)
+        page.show()
+        app.processEvents()
+        spy.windows.clear()
+
+        page.set_date(date(2026, 9, 7))
+        app.processEvents()
+        page.set_date(date(2026, 9, 8))
+        app.processEvents()
+
+        app.removeEventFilter(spy)
+        page.close()
+
+        assert not spy.windows, (
+            f"UI-27: при сборке карточек показано {len(spy.windows)} лишних "
+            f"окон ({set(spy.windows)}) — это и есть всплывающие блоки"
+        )
+
+    def test_refresh_detaches_rows_from_container(self, seeded):
+        """UI-26: обновление списка снимает старые строки с контейнера.
+
+        Проверяем на подставной строке: реальные данные в seed не нужны,
+        а поведение одинаково на всех списках.
+        """
+        from PySide6.QtWidgets import QApplication, QLabel
+
+        from student_planner.ui.pages import (
+            ExpensesPage,
+            HomeworkPage,
+            TripsPage,
+        )
+
+        app = QApplication.instance() or QApplication([])
+
+        cases = [
+            ("Задания", HomeworkPage(seeded), "list_layout"),
+            ("Расходы", ExpensesPage(seeded), "structure_layout"),
+            ("Поездки", TripsPage(seeded), "rides_layout"),
+        ]
+        failures = []
+
+        for caption, page, layout_name in cases:
+            page.show()
+            page.refresh()
+            app.processEvents()
+
+            owner = page
+            if not hasattr(owner, layout_name):
+                owner = getattr(page, "report_tab", None) or getattr(
+                    page, "confirm_tab", None
+                )
+            layout = getattr(owner, layout_name)
+
+            sentinel = QLabel("старая строка")
+            layout.addWidget(sentinel)
+            app.processEvents()
+
+            # Без processEvents: цикл событий не успевает обработать
+            # отложенное удаление — ровно как при живом обновлении.
+            page.refresh()
+
+            if sentinel.isVisible() or sentinel.parent() is not None:
+                failures.append(
+                    f"{caption}: строка осталась на контейнере "
+                    f"(видима={sentinel.isVisible()}, "
+                    f"родитель={sentinel.parent()})"
+                )
+            page.close()
+
+        assert not failures, (
+            "UI-26: после обновления старые строки остаются видимыми и "
+            "рисуются поверх новых — " + "; ".join(failures)
+        )
+
+
+
 class TestSchedulePage:
     """SCH-02/SCH-09/SCH-10: три режима и карточки занятий."""
+
+    def test_switching_days_leaves_no_ghost_widgets(self, seeded):
+        """UI-26: смена дня не оставляет видимых «призраков» старых колонок.
+
+        Дефект из отчёта: при переключении дней на несколько секунд
+        появлялись и закрывались «свёрнутые окна». Это снятые из layout, но
+        ещё не удалённые колонки: ``deleteLater()`` отложен, а виджет с
+        прежним родителем остаётся видимым и рисуется поверх новых. За шесть
+        переключений накапливалось восемь таких колонок, три из них видимых.
+        """
+        from datetime import date as date_type
+        from datetime import timedelta
+
+        from PySide6.QtWidgets import QApplication
+
+        from student_planner.ui.pages.schedule import DayColumn, SchedulePage
+
+        page = SchedulePage(seeded)
+        page.show()
+        app = QApplication.instance()
+        page.set_date(date_type(2026, 10, 26))
+        app.processEvents()
+
+        for index in range(8):
+            # Без processEvents между кликами — ровно как в реальном
+            # переключении, когда цикл событий не успевает обработать удаление.
+            page.set_date(date_type(2026, 10, 26) + timedelta(days=index))
+            ghosts = [
+                column for column in page.days_host.findChildren(DayColumn)
+                if page.days_layout.indexOf(column) == -1
+            ]
+            visible = [column for column in ghosts if column.isVisible()]
+            assert not visible, (
+                f"UI-26: после переключения осталось {len(visible)} видимых "
+                f"колонок вне раскладки (всего призраков {len(ghosts)})"
+            )
 
     def test_three_modes_only(self, seeded):
         """SCH-02: ровно три режима отображения, без режима «шаблон недели»."""

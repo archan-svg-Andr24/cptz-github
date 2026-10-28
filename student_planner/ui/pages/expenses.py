@@ -168,6 +168,10 @@ class ReportTab(QWidget):
             item = self.structure_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # UI-26: без hide()+setParent(None) снятая строка остаётся
+                # видимой до отложенного deleteLater и рисуется поверх новой.
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         structure = totals.structure()

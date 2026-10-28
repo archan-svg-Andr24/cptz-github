@@ -149,6 +149,11 @@ class LessonCard(QFrame):
         # Действия. Набор кнопок зависит от состояния пары: показываем только
         # осмысленные действия. Раньше «Заменить» и «Убрать изменение» висели
         # одновременно, и блок пары вырастал с 62 до 86 px.
+        # UI-27: раскладка получает родителя сразу (self). Вложенная раскладка
+        # без родителя НЕ назначает родителя добавляемым виджетам: кнопка
+        # остаётся самостоятельным окном, и любой setVisible(True) показывает
+        # её отдельным окном на один кадр — это и были «всплывающие окна» при
+        # переключении дней.
         actions = QVBoxLayout()
         actions.setSpacing(4)
 
@@ -160,20 +165,20 @@ class LessonCard(QFrame):
             and lesson.status in (LessonStatus.CANCELLED, LessonStatus.REPLACED)
         )
 
-        self.cancel_button = QPushButton("Отменить")
+        self.cancel_button = QPushButton("Отменить", self)
         self.cancel_button.setObjectName("Flat")
         self.cancel_button.clicked.connect(
             lambda: self.cancel_requested.emit(self.lesson.profile_id, self.lesson.slot_no)
         )
-        # На отменённой паре кнопка уже не нужна, на заменённой — бессмысленна:
-        # отменять нечего, пара и так изменена.
-        self.cancel_button.setVisible(not has_change)
         self.cancel_button.setEnabled(
             lesson.status in (LessonStatus.PLANNED, LessonStatus.ADDED)
         )
         actions.addWidget(self.cancel_button)
+        # На отменённой паре кнопка уже не нужна, на заменённой — бессмысленна:
+        # отменять нечего, пара и так изменена.
+        self.cancel_button.setVisible(not has_change)
 
-        self.replace_button = QPushButton("Заменить")
+        self.replace_button = QPushButton("Заменить", self)
         self.replace_button.setObjectName("Flat")
         self.replace_button.clicked.connect(
             lambda: self.replace_requested.emit(self.lesson.profile_id, self.lesson.slot_no)
@@ -181,23 +186,23 @@ class LessonCard(QFrame):
         # SCH-18/OVR-05: заменять можно и отменённую пару — это путь «убрал
         # одну, поставил другую»: cancel снимается, ставится replace.
         self.replace_button.setEnabled(True)
+        actions.addWidget(self.replace_button)
         # На заменённой паре второго «Заменить» не показываем: замену снимают
         # через «Убрать изменение», иначе кнопки дублируют друг друга.
         self.replace_button.setVisible(lesson.status != LessonStatus.REPLACED)
-        actions.addWidget(self.replace_button)
 
         # OVR-11: «Убрать изменение» возвращает пару к состоянию расписания.
-        self.undo_button = QPushButton("↺ Убрать изменение")
+        self.undo_button = QPushButton("↺ Убрать изменение", self)
         self.undo_button.setObjectName("Danger")
         self.undo_button.setToolTip(
             "Снять изменение этой даты: отмена вернёт пару в расписание, "
             "замена — предмет из сетки. Сама сетка не меняется."
         )
-        self.undo_button.setVisible(has_change)
         self.undo_button.clicked.connect(
             lambda: self.reset_requested.emit(self.lesson.override_id)
         )
         actions.addWidget(self.undo_button)
+        self.undo_button.setVisible(has_change)
         layout.addLayout(actions)
 
 
@@ -230,6 +235,11 @@ class DayColumn(QWidget):
             item = self.body.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # deleteLater() отложен: без hide()+setParent(None) старая
+                # карточка остаётся видимой до возврата в цикл событий и
+                # рисуется поверх новой.
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
 
@@ -392,6 +402,14 @@ class SchedulePage(QWidget):
             item = self.days_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # UI-26: hide()+setParent(None) обязательны. Одного
+                # deleteLater() мало: удаление отложено до возврата в цикл
+                # событий, а снятый из layout виджет сохраняет родителя и
+                # остаётся видимым. При переключении дней такие «призраки»
+                # копились и рисовались поверх новых колонок — выглядело как
+                # всплывающие и сразу закрывающиеся окна.
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         days = self._visible_days()
@@ -415,6 +433,8 @@ class SchedulePage(QWidget):
             item = self.week_badge_holder.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         if week_type:
