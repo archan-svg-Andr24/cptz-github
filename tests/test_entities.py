@@ -290,25 +290,6 @@ def test_acc_m_109_overdue_is_computed_not_stored(homework_repo_factory, db,
     assert repo.require(item.id).is_overdue(today) is False, "Выполненное не просрочено"
 
 
-def test_acc_m_113_homework_group_mark_stays_null(homework_repo_factory, db,
-                                                 simple_subjects) -> None:
-    """ACC-M-113 / HW-01: приложение пишет group_mark = NULL и после создания, и после правки.
-
-    Схема допускает 1 и 2 как задел v1.1, поэтому проверяется именно
-    поведение приложения, а не CHECK-ограничение.
-    """
-    repo = homework_repo_factory(db)
-    item = repo.create(simple_subjects[0].id, date(2026, 9, 14), "Задание")
-    stored = db.fetchone("SELECT group_mark FROM homework WHERE id = ?", (item.id,))
-    assert stored["group_mark"] is None, (
-        f"HW-01: приложение не должно заполнять group_mark, в БД {stored['group_mark']!r}"
-    )
-
-    repo.update(item.id, description="Уточнённое описание")
-    after = db.fetchone("SELECT group_mark FROM homework WHERE id = ?", (item.id,))
-    assert after["group_mark"] is None, (
-        f"HW-01: правка не должна заполнять group_mark, в БД {after['group_mark']!r}"
-    )
 
 
 def test_acc_m_112_homework_deleted_with_subject_blocked(homework_repo_factory, db,

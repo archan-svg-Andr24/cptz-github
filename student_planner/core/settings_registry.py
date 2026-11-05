@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from .errors import SettingsError
 from .paths import BACKUP_DIR_TEMPLATE, DB_PATH_TEMPLATE
+from .subject_abbreviations import DEFAULT_SHORT_NAMES_TEXT
 from . import dates as dt
 
 
@@ -34,11 +35,26 @@ class SettingsKeys:
     DATE_DISPLAY_FORMAT = "date_display_format"
     TIME_DISPLAY_FORMAT = "time_display_format"
     DB_PATH = "db_path"
+    UI_THEME = "ui_theme"
     STUDENT_NAME = "student_name"
     GROUP_TITLE = "group_title"
     COLLEGE_NAME = "college_name"
     HOME_POINT_NAME = "home_point_name"
     BACKUP_DIR = "backup_dir"
+    #: NOTIF-01…NOTIF-05: системные уведомления.
+    NOTIFY_ENABLED = "notify_enabled"
+    NOTIFY_EXAM_DAYS = "notify_exam_days"
+    NOTIFY_HOMEWORK_DAYS = "notify_homework_days"
+    NOTIFY_LESSON_MINUTES = "notify_lesson_minutes"
+    NOTIFY_LOW_BALANCE = "notify_low_balance"
+    #: UI-25: состояние правой панели виджетов.
+    WIDGETS_COLLAPSED = "widgets_collapsed"
+    #: UI-23: ширина правой панели виджетов (px).
+    WIDGETS_WIDTH = "widgets_width"
+    #: UI-14 (v1.1): сокращённые названия предметов в расписании.
+    SUBJECT_ABBREVIATIONS_ENABLED = "subject_abbreviations_enabled"
+    SUBJECT_ABBREVIATIONS_STYLE = "subject_abbreviations_style"
+    SUBJECT_SHORT_NAMES = "subject_short_names"
 
 
 class SettingType:
@@ -56,13 +72,14 @@ class SettingType:
 class UiSection:
     NONE = ""
     GENERAL = "Общие"
+    SUBJECTS = "Предметы"
     WEEKS = "Недели"
     BELLS = "Звонки"
     TRANSPORT = "Транспорт"
     CALENDAR = "Календарь"
     DATA = "Данные"
 
-    ORDER: tuple[str, ...] = (GENERAL, WEEKS, BELLS, TRANSPORT, CALENDAR, DATA)
+    ORDER: tuple[str, ...] = (GENERAL, SUBJECTS, WEEKS, BELLS, TRANSPORT, CALENDAR, DATA)
 
 
 @dataclass(frozen=True)
@@ -169,11 +186,12 @@ _REGISTRY: tuple[SettingSpec, ...] = (
     ),
     SettingSpec(
         SettingsKeys.DATE_DISPLAY_FORMAT, SettingType.STRING, "DD.MM.YYYY", UiSection.GENERAL,
-        "Формат даты", choices=("DD.MM.YYYY",),
+        "Формат даты", choices=("DD.MM.YYYY", "YYYY-MM-DD", "DD.MM.YY"),
+        hint="Применяется сразу ко всем датам интерфейса.",
     ),
     SettingSpec(
         SettingsKeys.TIME_DISPLAY_FORMAT, SettingType.STRING, "HH:MM", UiSection.GENERAL,
-        "Формат времени", choices=("HH:MM",),
+        "Формат времени", choices=("HH:MM", "HH:MM:SS"),
     ),
     SettingSpec(
         SettingsKeys.STUDENT_NAME, SettingType.STRING, "", UiSection.GENERAL,
@@ -188,6 +206,11 @@ _REGISTRY: tuple[SettingSpec, ...] = (
     SettingSpec(
         SettingsKeys.HOME_POINT_NAME, SettingType.STRING, "пос. Авсюнино", UiSection.GENERAL,
         "Домашняя точка", level="v1.1 (резерв)",
+    ),
+    SettingSpec(
+        SettingsKeys.UI_THEME, SettingType.ENUM, "dark", UiSection.GENERAL,
+        "Тема оформления", choices=("dark", "light", "rainbow"),
+        hint="Применяется сразу, без перезапуска. Значение читается при запуске.",
     ),
     SettingSpec(
         SettingsKeys.FRIDAY_DEFAULT_VARIANT, SettingType.ENUM, "standard", UiSection.BELLS,
@@ -221,10 +244,66 @@ _REGISTRY: tuple[SettingSpec, ...] = (
         SettingsKeys.STRELKA_LOW_BALANCE_WARN, SettingType.INT, "2", UiSection.TRANSPORT,
         "Порог предупреждения об остатке, поездок", minimum=0,
     ),
+    # --- NOTIF-01…NOTIF-05: системные уведомления --------------------------
+    SettingSpec(
+        SettingsKeys.NOTIFY_ENABLED, SettingType.ENUM, "1", UiSection.GENERAL,
+        "Системные уведомления", choices=("1", "0"),
+        hint="Напоминания о парах, дедлайнах и экзаменах (NOTIF-01).",
+    ),
+    SettingSpec(
+        SettingsKeys.NOTIFY_EXAM_DAYS, SettingType.INT, "7", UiSection.GENERAL,
+        "Напоминать об экзамене, дней", minimum=0,
+    ),
+    SettingSpec(
+        SettingsKeys.NOTIFY_HOMEWORK_DAYS, SettingType.INT, "1", UiSection.GENERAL,
+        "Напоминать о дедлайне задания, дней", minimum=0,
+    ),
+    SettingSpec(
+        SettingsKeys.NOTIFY_LESSON_MINUTES, SettingType.INT, "15", UiSection.GENERAL,
+        "Напоминать о начале пары, минут", minimum=0,
+    ),
+    SettingSpec(
+        SettingsKeys.NOTIFY_LOW_BALANCE, SettingType.ENUM, "1", UiSection.GENERAL,
+        "Предупреждать о низком остатке «Стрелки»", choices=("1", "0"),
+    ),
+    # --- UI-25: состояние правой панели ------------------------------------
+    SettingSpec(
+        SettingsKeys.WIDGETS_COLLAPSED, SettingType.ENUM, "0", UiSection.CALENDAR,
+        "Правая панель свёрнута", choices=("0", "1"),
+        hint="Состояние сохраняется и восстанавливается при следующем запуске (UI-25).",
+    ),
+    SettingSpec(
+        SettingsKeys.WIDGETS_WIDTH, SettingType.INT, "280", UiSection.CALENDAR,
+        "Ширина правой панели, px", minimum=220,
+        hint="Запоминается после перетаскивания разделителя (UI-23).",
+    ),
     SettingSpec(
         SettingsKeys.DB_PATH, SettingType.PATH, DB_PATH_TEMPLATE, UiSection.DATA,
         "Путь к базе данных",
         hint="Значение по умолчанию хранится шаблоном %APPDATA% и раскрывается при запуске (GEN-16).",
+    ),
+    # --- UI-14: сокращённые названия предметов ------------------------------
+    # Ключ виден в разделе «Предметы»: там же стоит переключатель и редактор.
+    # Хранить таблицу строкой «Название=Сокращение» дешевле, чем заводить
+    # отдельную таблицу: схема БД остаётся 18-табличной (ACC-M-97), а значение
+    # переносится вместе с базой.
+    SettingSpec(
+        SettingsKeys.SUBJECT_ABBREVIATIONS_ENABLED, SettingType.ENUM, "1",
+        UiSection.SUBJECTS, "Сокращать названия предметов", choices=("1", "0"),
+        hint="Короткие подписи в расписании, заданиях и на правой панели (UI-14).",
+    ),
+    SettingSpec(
+        SettingsKeys.SUBJECT_ABBREVIATIONS_STYLE, SettingType.ENUM, "medium",
+        UiSection.SUBJECTS, "Набор сокращений",
+        choices=("medium", "short"),
+        hint="«Средние» — читаемые подписи; «Минимальные» — для плотной сетки недели.",
+    ),
+    SettingSpec(
+        SettingsKeys.SUBJECT_SHORT_NAMES, SettingType.STRING,
+        DEFAULT_SHORT_NAMES_TEXT, UiSection.SUBJECTS,
+        "Свои сокращения",
+        hint="Строки «Название=Сокращение». Пустое сокращение оставляет предмет "
+             "без сокращения; стандартные подписи хранятся в коде и здесь не нужны.",
     ),
     SettingSpec(
         SettingsKeys.BACKUP_DIR, SettingType.PATH, BACKUP_DIR_TEMPLATE, UiSection.DATA,

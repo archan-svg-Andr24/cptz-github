@@ -41,7 +41,6 @@ from ..core.recalculation import RecalculationService
 from ..core.schedule_service import HomeworkService, OverrideService
 from ..core.transport_service import TransportService, WalletService
 from ..core.trip_service import TripPlanService
-from .theme import COLORS
 from .widgets import Separator
 
 log = logging.getLogger(__name__)
@@ -61,27 +60,45 @@ def _to_date(widget: QDateEdit) -> date:
 
 
 class BaseDialog(QDialog):
-    """Общая основа: тёмная тема, кнопки, показ ошибок."""
+    """Общая основа: тема из настроек, кнопки, показ ошибок.
+
+    Свою таблицу стилей диалог не ставит: тема применена к ``QApplication``, и
+    диалог наследует её автоматически. Это единственный способ, которым
+    переключение темы на лету доходит до уже открытых окон.
+    """
 
     def __init__(self, parent: QWidget | None = None, title: str = "") -> None:
         super().__init__(parent)
-        from .theme import stylesheet
-
-        self.setStyleSheet(stylesheet())
         self.setWindowTitle(title)
         self.setModal(True)
         self.layout_ = QVBoxLayout(self)
         self.layout_.setContentsMargins(16, 14, 16, 14)
         self.layout_.setSpacing(10)
+        # Кнопки создаются сразу (их наличие ожидают и тесты, и подклассы), но
+        # в раскладку попадают только при ``finish()``. Чтобы скрытая панель не
+        # перехватывала Enter, кнопка «Отмена» **не** делается кнопкой по
+        # умолчанию, а сама панель получает родителя-диалог: иначе она
+        # оставалась самостоятельным верхнеуровневым окном 640×480.
+        self.buttons = self._make_buttons()
 
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    def _make_buttons(self) -> QDialogButtonBox:
+        """Создать стандартную панель кнопок и подключить её обработчики."""
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
         )
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("Primary")
-        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        self.buttons.accepted.connect(self._on_accept)
-        self.buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Сохранить")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("Primary")
+        cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        cancel.setText("Отмена")
+        # Diалог строится своими кнопками — снимаем «по умолчанию», иначе Enter
+        # нажимает «Отмену» и введённое теряется.
+        cancel.setAutoDefault(False)
+        cancel.setDefault(False)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setAutoDefault(False)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        return buttons
 
     def add_widget(self, widget: QWidget) -> None:
         self.layout_.addWidget(widget)
@@ -90,17 +107,16 @@ class BaseDialog(QDialog):
         self.layout_.addLayout(form)
 
     def finish(self, ok_text: str = "Сохранить") -> None:
+        """Добавить стандартные кнопки в конец диалога."""
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(ok_text)
         self.layout_.addWidget(self.buttons)
 
     def error_label(self) -> QLabel:
         label = QLabel()
+        label.setObjectName("ErrorBanner")
         label.setWordWrap(True)
         label.setVisible(False)
-        label.setStyleSheet(
-            f"color: {COLORS['error']}; background-color: {COLORS['error_bg']}; "
-            f"border: 1px solid {COLORS['error']}; border-radius: 6px; padding: 6px;"
-        )
+        self._error_label = label
         self.layout_.addWidget(label)
         return label
 
@@ -113,9 +129,38 @@ class BaseDialog(QDialog):
         label.setText(text)
         label.setVisible(True)
 
+    def _clear_error(self) -> None:
+        """Спрятать прошлую ошибку перед новой попыткой сохранения.
+
+        Иначе сообщение висело в диалоге даже после успешной правки.
+        """
+        label = getattr(self, "_error_label", None)
+        if label is not None:
+            label.setText("")
+            label.setVisible(False)
+
+    def _submit(self) -> bool:
+        """Выполнить сохранение, поддерживая оба имени метода.
+
+        Исторически часть диалогов определяла ``save()``, а ``BaseDialog``
+        вызывает ``apply()``. Из-за этого правка блока звонков закрывалась
+        «успешно», ничего не сохранив. Теперь ``save()`` тоже принимается —
+        как защита от повторения такой ошибки.
+        """
+        handler = getattr(self, "apply", None)
+        base_apply = getattr(BaseDialog, "apply", None)
+        if handler is not None and getattr(handler, "__func__", None) is not base_apply:
+            return bool(handler())
+        save = getattr(self, "save", None)
+        if save is not None and callable(save):
+            save()
+            return True
+        return True
+
     def _on_accept(self) -> None:
         try:
-            if self.apply():
+            self._clear_error()
+            if self._submit():
                 self.accept()
         except AppError as error:
             log.info("Диалог отклонил ввод: %s", error)
@@ -371,10 +416,34 @@ class ReplaceLessonDialog(BaseDialog):
             self.teacher_edit.setText(subject.teacher or "")
             self.room_edit.setText(subject.room or "")
 
-    def apply(self) -> bool:
-        subject_id = self.subject_combo.currentData()
-        if subject_id is None:
+    def _resolve_subject(self) -> int:
+        """Предмет из поля ввода: выбранный пункт или созданный по названию.
+
+        Поле редактируемое, но ``currentData()`` возвращает данные **пункта**, а
+        не набранный текст: при вводе нового названия «Сохранить» подставлял
+        предыдущий предмет. Теперь набранный текст ищется среди существующих,
+        а если такого нет — создаётся предмет с этим названием.
+        """
+        text = self.subject_combo.currentText().strip()
+        index = self.subject_combo.currentIndex()
+        if index >= 0 and self.subject_combo.currentData() is not None:
+            if not text or text == self.subject_combo.itemText(index):
+                return int(self.subject_combo.currentData())
+        if not text:
             raise AppError("Выберите предмет для замены (OVR-05).")
+        existing = next(
+            (s for s in self.subjects if s.name.casefold() == text.casefold()), None
+        )
+        if existing is not None:
+            return existing.id
+        from ..core.repositories import SubjectRepository
+
+        created = SubjectRepository(self.db).create(text)
+        self.subjects = SubjectRepository(self.db).all(include_inactive=False)
+        return created.id
+
+    def apply(self) -> bool:
+        subject_id = self._resolve_subject()
         # OVR-05: незаполненное поле — не «нет данных», а «как в справочнике».
         # Иначе стёртый преподаватель сохранялся бы как отсутствие и карточка
         # теряла бы данные, уже внесённые при создании предмета.
@@ -436,10 +505,7 @@ class AddLessonDialog(BaseDialog):
         for number, text, busy in (slots or [(slot_no, caption, False)]):
             mark = "занят — заменить" if busy else "свободен"
             self.slot_combo.addItem(f"Блок {number} — {text} ({mark})", number)
-        self.slot_combo.setCurrentIndex(
-            max(0, [self.slot_combo.itemData(i) for i in range(self.slot_combo.count())]
-                .index(slot_no)) if self.slot_combo.count() else 0
-        )
+        self.slot_combo.setCurrentIndex(self._index_of_slot(slot_no))
         self.slot_combo.currentIndexChanged.connect(self._on_slot_changed)
         form.addRow("Блок:", self.slot_combo)
 
@@ -470,6 +536,20 @@ class AddLessonDialog(BaseDialog):
                 self.teacher_edit.setText(subject.teacher)
             if subject.room:
                 self.room_edit.setText(subject.room)
+
+    def _index_of_slot(self, slot_no: int) -> int:
+        """Позиция блока в списке или 0, если такого блока нет.
+
+        ``list.index`` бросает ``ValueError``, когда профиль звонков и список
+        слотов разошлись (например, блок удалили), и диалог не открывался
+        вовсе — исключение уходило в слот Qt.
+        """
+        if self.slot_combo.count() == 0:
+            return 0
+        for index in range(self.slot_combo.count()):
+            if self.slot_combo.itemData(index) == slot_no:
+                return index
+        return 0
 
     def _on_slot_changed(self) -> None:
         number = self.slot_combo.currentData()
@@ -517,10 +597,14 @@ class TopUpDialog(BaseDialog):
         form = QFormLayout()
         form.setSpacing(8)
         self.date_edit = _date_edit(date.today())
+        # WAL-02: дата пополнения не может быть в будущем — остаток считается
+        # на текущий момент, и пополнение «из будущего» его искажает.
+        self.date_edit.setMaximumDate(QDate.currentDate())
         form.addRow("Дата:", self.date_edit)
 
         self.amount_spin = QDoubleSpinBox()
-        self.amount_spin.setRange(0.00, 1_000_000.00)
+        # WAL-01: нулевое пополнение бессмысленно и засоряет журнал.
+        self.amount_spin.setRange(0.01, 1_000_000.00)
         self.amount_spin.setDecimals(2)
         self.amount_spin.setSuffix(" ₽")
         form.addRow("Сумма:", self.amount_spin)
@@ -794,10 +878,24 @@ class PeriodDialog(BaseDialog):
         return True
 
 
-def _select_id(combo: QComboBox, value) -> None:
+def _select_id(combo: QComboBox, value, *, label: str | None = None) -> None:
+    """Выбрать пункт по данным, добавив его при отсутствии.
+
+    Списки предметов содержат только **активные** записи. Если открыть старое
+    задание или испытание, у которого предмет уже отключён, ``findData`` ничего
+    не находил, ``currentIndex`` оставался нулевым — и «Сохранить» молча
+    перевешивал запись на первый активный предмет. Поэтому недостающий пункт
+    добавляется отдельной строкой с пометкой «отключён».
+    """
     index = combo.findData(value)
     if index >= 0:
         combo.setCurrentIndex(index)
+        return
+    if value is None:
+        return
+    caption = label or f"#{value} (отключён)"
+    combo.addItem(caption, value)
+    combo.setCurrentIndex(combo.count() - 1)
 
 
 __all__ = [

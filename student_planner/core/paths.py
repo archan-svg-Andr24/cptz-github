@@ -80,6 +80,76 @@ def resolve_db_path(stored_value: str | None) -> Path:
     return expand_path(value)
 
 
+def pointer_file() -> Path:
+    """Файл-указатель на рабочую базу (DATA-02, ``db_path``).
+
+    Настройка ``db_path`` живёт **внутри** самой базы: пока приложение не
+    открыло файл, прочитать её невозможно. Поэтому выбранный пользователем
+    путь дублируется маленьким текстовым файлом в каталоге приложения — по
+    нему следующий запуск находит нужную базу. В самом файле БД остаётся
+    актуальное значение настройки (SET-07).
+    """
+    return appdata_dir() / "database.path"
+
+
+def read_pointer() -> Path | None:
+    """Прочитать путь из файла-указателя; ``None``, если его нет или он пуст."""
+    try:
+        raw = pointer_file().read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return expand_path(raw) if raw else None
+
+
+def write_pointer(path: Path) -> None:
+    """Запомнить рабочую базу для следующего запуска (DATA-02)."""
+    target = pointer_file()
+    ensure_dir(target.parent)
+    target.write_text(str(Path(path)), encoding="utf-8")
+
+
+def clear_pointer() -> None:
+    """Забыть указатель (сброс на путь по умолчанию)."""
+    try:
+        pointer_file().unlink()
+    except OSError:
+        pass
+
+
+def startup_db_path(db=None) -> Path:
+    """Путь базы, который открывает запуск (DATA-02, SET-07).
+
+    Приоритет:
+
+    1. настройка ``db_path`` в уже открытой базе, если она задана и **не
+       равна пути по умолчанию**;
+    2. файл-указатель, оставленный прошлым запуском;
+    3. путь по умолчанию.
+
+    Значение по умолчанию намеренно не перебивает указатель: в стартовом
+    наборе ``db_path`` содержит шаблон пути по умолчанию, и если считать его
+    «заданным», выбор пользователя из настройки никогда бы не применился.
+    """
+    if db is not None:
+        try:
+            from .settings_registry import SettingsKeys, default_registry
+            from .settings_service import SettingsService
+
+            stored = SettingsService(db).raw(SettingsKeys.DB_PATH)
+            default_value = default_registry().default_of(SettingsKeys.DB_PATH)
+        except Exception:  # pragma: no cover - защита запуска
+            stored, default_value = "", ""
+        # Сравниваем со **значением по умолчанию из реестра** (шаблоном), а не
+        # с раскрытым путём: иначе шаблон, раскрытый в другой каталог, считался
+        # бы пользовательским выбором и перебивал файл-указатель.
+        if stored and stored != default_value:
+            return resolve_db_path(stored)
+    pointed = read_pointer()
+    if pointed is not None:
+        return pointed
+    return default_db_path()
+
+
 __all__ = [
     "DB_PATH_TEMPLATE",
     "BACKUP_DIR_TEMPLATE",
@@ -91,4 +161,9 @@ __all__ = [
     "ensure_dir",
     "ensure_parent",
     "resolve_db_path",
+    "pointer_file",
+    "read_pointer",
+    "write_pointer",
+    "clear_pointer",
+    "startup_db_path",
 ]

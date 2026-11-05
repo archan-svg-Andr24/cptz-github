@@ -187,6 +187,47 @@ class HomeworkStatus:
         return cls.LABELS.get(value or "", value or "—")
 
 
+class ExamKind:
+    """Вид испытания (EXAM-02)."""
+
+    EXAM: Final = "exam"
+    CREDIT: Final = "credit"
+    CREDIT_DIFF: Final = "credit_diff"
+
+    ALL: Final = (EXAM, CREDIT, CREDIT_DIFF)
+    LABELS: Final = {
+        EXAM: "Экзамен",
+        CREDIT: "Зачёт",
+        CREDIT_DIFF: "Дифференцированный зачёт",
+    }
+
+    @classmethod
+    def label(cls, value: str | None) -> str:
+        return cls.LABELS.get(value or "", value or "—")
+
+    @classmethod
+    def short_label(cls, value: str | None) -> str:
+        """Короткая подпись для метки в календаре и бейджа."""
+        return {cls.EXAM: "Экзамен", cls.CREDIT: "Зачёт", cls.CREDIT_DIFF: "Дифф. зачёт"}.get(
+            value or "", cls.label(value)
+        )
+
+
+class ExamStatus:
+    """Состояние испытания (EXAM-03)."""
+
+    PLANNED: Final = "planned"
+    PASSED: Final = "passed"
+    POSTPONED: Final = "postponed"
+
+    ALL: Final = (PLANNED, PASSED, POSTPONED)
+    LABELS: Final = {PLANNED: "Предстоит", PASSED: "Сдан", POSTPONED: "Перенесён"}
+
+    @classmethod
+    def label(cls, value: str | None) -> str:
+        return cls.LABELS.get(value or "", value or "—")
+
+
 # ------------------------------------------------------------------ записи
 @dataclass(frozen=True)
 class Subject:
@@ -332,7 +373,6 @@ class TemplateCell:
     week_type: str
     slot_no: int
     subject_id: int | None
-    group_mark: int | None = None
     effective_from: date | None = None
 
     @property
@@ -357,7 +397,6 @@ class ScheduleOverride:
     keep_original: int = 0
     comment: str | None = None
     created_at: str = ""
-    group_mark: int | None = None
     part_seq: int | None = None
 
 
@@ -499,7 +538,6 @@ class Homework:
     status: str = HomeworkStatus.ACTIVE
     created_at: str = ""
     completed_at: str | None = None
-    group_mark: int | None = None
 
     @property
     def is_active(self) -> bool:
@@ -614,6 +652,85 @@ class DayResolution:
         return WeekType.label(self.week_type)
 
 
+@dataclass(frozen=True)
+class Exam:
+    """Экзамен или зачёт (EXAM-01, Прил. Б.12).
+
+    ``date`` — дата испытания, ``time`` — необязательное время начала.
+    ``status`` управляет отображением: сданные не попадают в счётчик
+    «ближайших», перенесённые показываются с пометкой.
+    """
+
+    id: int
+    subject_id: int
+    kind: str
+    date: date
+    status: str = ExamStatus.PLANNED
+    time: str | None = None
+    room: str | None = None
+    teacher: str | None = None
+    period_id: int | None = None
+    comment: str | None = None
+    created_at: str = ""
+
+    @property
+    def kind_label(self) -> str:
+        return ExamKind.label(self.kind)
+
+    @property
+    def kind_short(self) -> str:
+        return ExamKind.short_label(self.kind)
+
+    @property
+    def status_label(self) -> str:
+        return ExamStatus.label(self.status)
+
+    @property
+    def is_passed(self) -> bool:
+        return self.status == ExamStatus.PASSED
+
+    def days_left(self, today: date) -> int:
+        """Сколько дней до испытания; отрицательное — уже прошло."""
+        return (self.date - today).days
+
+    def is_upcoming(self, today: date) -> bool:
+        """Предстоит ли: не сдан, не перенесён и дата не прошла."""
+        return not self.is_passed and self.status != ExamStatus.POSTPONED and self.date >= today
+
+
+@dataclass(frozen=True)
+class DayExam:
+    """Испытание с подписями для интерфейса (EXAM-06)."""
+
+    exam: Exam
+    subject_name: str
+    days_left: int
+
+    @property
+    def caption(self) -> str:
+        parts = [self.subject_name, self.exam.kind_short]
+        if self.exam.time:
+            parts.append(self.exam.time)
+        if self.exam.room:
+            parts.append(f"каб. {self.exam.room}")
+        return " · ".join(part for part in parts if part)
+
+    @property
+    def countdown(self) -> str:
+        """Подпись «через N дней» / «сегодня» / «прошёл»."""
+        if self.exam.is_passed:
+            return "Сдан"
+        if self.exam.status == ExamStatus.POSTPONED:
+            return "Перенесён"
+        if self.days_left == 0:
+            return "Сегодня"
+        if self.days_left == 1:
+            return "Завтра"
+        if self.days_left > 1:
+            return f"Через {self.days_left} дн."
+        return "Прошёл"
+
+
 __all__ = [
     "WeekType",
     "PaymentMethod",
@@ -639,6 +756,10 @@ __all__ = [
     "Ride",
     "TopUp",
     "Homework",
+    "ExamKind",
+    "ExamStatus",
+    "Exam",
+    "DayExam",
     "DayLesson",
     "DayResolution",
 ]

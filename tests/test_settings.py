@@ -306,12 +306,18 @@ def test_all_settings_readable_after_seed(db) -> None:
     }
     # Якорь «Стрелки» по умолчанию — пустая строка, то есть «не задано»:
     # период начнётся с первой поездки (FARE-12, ALG-02 шаг 1).
-    intentionally_empty = {SettingsKeys.STRELKA_PERIOD_ANCHOR_DATE}
+    # «Свои сокращения» (UI-14) тоже пусты по умолчанию осознанно: стандартные
+    # наборы подписей живут в коде, а настройка хранит только переопределения
+    # пользователя — иначе смена набора не давала бы эффекта.
+    intentionally_empty = {
+        SettingsKeys.STRELKA_PERIOD_ANCHOR_DATE,
+        SettingsKeys.SUBJECT_SHORT_NAMES,
+    }
     for spec in registry.all():
         if spec.key in user_filled:
             continue
         if spec.key in intentionally_empty:
-            assert values[spec.key] == "", "Якорь по умолчанию — «не задано»"
+            assert values[spec.key] == "", f"«{spec.label}» по умолчанию пуста"
             continue
         if spec.type == SettingType.PATH:
             assert values[spec.key], f"Путь «{spec.label}» должен быть задан шаблоном"

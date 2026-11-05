@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from . import clock
-from .dates import to_iso
+from .dates import format_display, to_iso
 from .day_resolution import DayResolver
 from .errors import NotFoundError, ValidationError
 from .models import (
@@ -148,7 +148,7 @@ class GridService:
         columns: list[GridColumn] = []
 
         for weekday in weekdays:
-            profile = self._profile_of_weekday(weekday)
+            profile = self._profile_of_weekday(weekday, on_date)
             if profile is None:
                 columns.append(
                     GridColumn(weekday=weekday, caption=_weekday_caption(weekday), profile_id=None)
@@ -156,7 +156,9 @@ class GridService:
                 continue
             slots: list[GridSlot] = []
             for slot in profile.slots:
-                cell = self.templates.cell(profile.id, week_type, slot.slot_no, on_date=on_date)
+                cell = self.templates.cell(
+                    profile.id, week_type, slot.slot_no, on_date=on_date
+                )
                 subject = subjects.get(cell.subject_id) if cell else None  # type: ignore[union-attr]
                 slots.append(
                     GridSlot(
@@ -188,12 +190,19 @@ class GridService:
             orphan_warnings=self._orphan_warnings(week_type),
         )
 
-    def _profile_of_weekday(self, weekday: int):
-        """Активный профиль дня по номеру дня недели (BELL-18)."""
-        for profile in self.bells.profiles(include_inactive=False):
-            if profile.weekday == weekday and profile.variant == "default":
-                return profile
-        return None
+    def _profile_of_weekday(self, weekday: int, on_date: date | None = None):
+        """Активный профиль дня по номеру дня недели (BELL-18).
+
+        Учитывается ``effective_from``/``effective_to``: раньше брался первый
+        профиль из списка, то есть бессрочный. Когда появлялся «зимний» профиль
+        (BELL-19), редактор сетки продолжал показывать и править старый, а день
+        уже разрешался по новому — правки уходили в никуда.
+        """
+        base = on_date or clock.today()
+        # Сдвигаем дату к нужному дню той же недели: ``profile_for`` ищет
+        # профиль по дню недели самой даты, а сетке нужна конкретная колонка.
+        target = base + timedelta(days=weekday - base.isoweekday())
+        return self.bells.profile_for(target, variant="default")
 
     def _orphan_warnings(self, week_type: str) -> list[str]:
         """GRID-06/ALG-10: сиротские оверрайды видны предупреждением, не удаляются."""
@@ -201,7 +210,7 @@ class GridService:
         if not found:
             return []
         return [
-            f"Изменение от {item.date.strftime('%d.%m.%Y')} ссылается на занятие, "
+            f"Изменение от {format_display(item.date)} ссылается на занятие, "
             f"которого больше нет в сетке (блок {item.slot_no})."
             for item in found
         ]
@@ -251,7 +260,8 @@ class GridService:
                     field="subject_id",
                 )
         return self.templates.set_cell(
-            profile_id, week_type, slot_no, subject_id, effective_from=effective_from
+            profile_id, week_type, slot_no, subject_id,
+            effective_from=effective_from,
         )
 
     def clear_cell(
@@ -265,7 +275,7 @@ class GridService:
         """GRID-05/DATA-20/TPL-08: пара убирается с даты; прошлые недели целы."""
         self._check_week_type(week_type)
         self.templates.clear_cell(
-            profile_id, week_type, slot_no, effective_from=effective_from
+            profile_id, week_type, slot_no, effective_from=effective_from,
         )
 
     def create_subject_for_cell(
@@ -303,7 +313,7 @@ class GridService:
         self._check_week_type(week_type)
         entries: list[tuple[int, int, int]] = []
         for weekday, cells in seed.WEEK_TEMPLATES[week_type].items():
-            profile = self._profile_of_weekday(weekday)
+            profile = self._profile_of_weekday(weekday, effective_from)
             if profile is None:
                 continue
             for slot_no, subject_key in cells.items():
@@ -527,7 +537,7 @@ class OverrideService:
         """SCH-17: сиротские изменения не применяются, но показываются предупреждением."""
         week_type = self.week_type_of(value)
         return [
-            f"Изменение на {item.date.strftime('%d.%m.%Y')} (блок {item.slot_no}) "
+            f"Изменение на {format_display(item.date)} (блок {item.slot_no}) "
             "ссылается на занятие, которого нет в сетке: оно не применено."
             for item in self.overrides.for_date(value)
             if self.overrides.is_orphan(item, week_type)
@@ -571,8 +581,8 @@ class CalendarEntry:
     @property
     def bounds_caption(self) -> str:
         return (
-            f"{self.start_date.strftime('%d.%m.%Y')} — "
-            f"{self.end_date.strftime('%d.%m.%Y')}"
+            f"{format_display(self.start_date)} — "
+            f"{format_display(self.end_date)}"
         )
 
 
@@ -681,6 +691,16 @@ class CalendarService:
 # ===========================================================================
 # §12 Домашние задания
 # ===========================================================================
+def _matches_query(row: "HomeworkRow", needle: str) -> bool:
+    """Совпадает ли строка задания с поиском (HW-13).
+
+    Ищем и в описании, и в названии предмета: пользователь помнит либо
+    «что задали», либо по какому предмету.
+    """
+    haystack = f"{row.description} {row.subject_name}".casefold()
+    return all(word in haystack for word in needle.split())
+
+
 @dataclass(frozen=True)
 class HomeworkGroup:
     """Группа списка заданий: заголовок и записи (HW-12)."""
@@ -731,8 +751,14 @@ class HomeworkService:
         only_overdue: bool = False,
         today: date | None = None,
         include_inactive_subjects: bool = True,
+        query: str | None = None,
     ) -> list[HomeworkRow]:
-        """HW-13: фильтры «Активные», «Выполненные», «Просроченные», «Все», по предмету."""
+        """HW-13: фильтры «Активные», «Выполненные», «Просроченные», «Все», по предмету.
+
+        ``query`` — поиск по тексту задания и названию предмета: ищет по
+        подстроке без учёта регистра, чтобы «лаб» находил «Лабораторная».
+        Пустая строка означает «без поиска», а не «ничего не найдено».
+        """
         base = today or clock.today()
         items = self.repo.filtered(
             status=status,
@@ -742,16 +768,20 @@ class HomeworkService:
             include_inactive_subjects=include_inactive_subjects,
         )
         names = {item.id: item.name for item in self.subjects.all()}
-        return [
+        rows = [
             HomeworkRow(
                 homework=item,
                 subject_name=names.get(item.subject_id, "—"),
-                due_caption=item.due_date.strftime("%d.%m.%Y"),
+                due_caption=format_display(item.due_date),
                 status_caption=HomeworkStatus.LABELS[item.status],
                 is_overdue=item.is_overdue(base),
             )
             for item in items
         ]
+        needle = (query or "").strip().casefold()
+        if not needle:
+            return rows
+        return [row for row in rows if _matches_query(row, needle)]
 
     def groups(
         self,
@@ -760,11 +790,16 @@ class HomeworkService:
         subject_id: int | None = None,
         only_overdue: bool = False,
         today: date | None = None,
+        query: str | None = None,
     ) -> list[HomeworkGroup]:
         """HW-12: группировка по дате сдачи, просроченные — отдельной группой."""
         base = today or clock.today()
         rows = self.rows(
-            status=status, subject_id=subject_id, only_overdue=only_overdue, today=base
+            status=status,
+            subject_id=subject_id,
+            only_overdue=only_overdue,
+            today=base,
+            query=query,
         )
         overdue = tuple(row for row in rows if row.is_overdue)
         upcoming = [row for row in rows if not row.is_overdue]
@@ -796,7 +831,7 @@ class HomeworkService:
             HomeworkRow(
                 homework=item,
                 subject_name=names.get(item.subject_id, "—"),
-                due_caption=item.due_date.strftime("%d.%m.%Y"),
+                due_caption=format_display(item.due_date),
                 status_caption=HomeworkStatus.LABELS[item.status],
                 is_overdue=False,
             )
@@ -894,7 +929,7 @@ def _due_caption(due_date: date, today: date) -> str:
         return "Сегодня"
     if delta == 1:
         return "Завтра"
-    return f"{due_date.strftime('%d.%m.%Y')}, {WEEKDAY_NAMES[due_date.isoweekday()]}"
+    return f"{format_display(due_date)}, {WEEKDAY_NAMES[due_date.isoweekday()]}"
 
 
 __all__ = [

@@ -23,7 +23,13 @@ from pathlib import Path
 from . import APP_NAME, APP_TITLE, APP_VERSION, SCHEMA_VERSION
 from .core.database import is_initialized, open_database
 from .core.errors import AppError, SchemaVersionError
-from .core.paths import default_db_path, ensure_dir, logs_dir
+from .core.paths import (
+    default_db_path,
+    ensure_dir,
+    logs_dir,
+    startup_db_path,
+    write_pointer,
+)
 from .core.seeding import initialize_database
 
 LOG_FILENAME = "student_planner.log"
@@ -85,14 +91,18 @@ def open_or_create_database():
     сохраняется рядом как резервная копия и создаётся заново со стартовым
     набором — механизма миграции в MVP нет (§34.1 п. 48).
 
+    SET-07/DATA-02: путь берётся из настройки ``db_path`` (файл-указатель
+    ``database.path``), а не всегда из каталога по умолчанию — иначе выбор
+    файла на странице «Данные» ни на что не влиял бы.
+
     Возвращает ``(db, created, backup_path)``: ``backup_path`` заполнен, если
     база была пересоздана из-за несовпадения версии схемы.
     """
-    path = default_db_path()
+    path = startup_db_path()
     if is_initialized(path):
         try:
             # DATA-19: несовпадение версии схемы — отказ без изменения файла.
-            return open_database(path), False, None
+            db = open_database(path)
         except SchemaVersionError as error:
             details = getattr(error, "details", {}) or {}
             stored = details.get("stored")
@@ -106,9 +116,30 @@ def open_or_create_database():
             )
             path.unlink()
             initialize_database(path)
+            _remember_path(path, created=True)
             return open_database(path), True, backup
+        _remember_path(path, created=False)
+        return db, False, None
+    ensure_dir(path.parent)
     initialize_database(path)
+    _remember_path(path, created=True)
     return open_database(path), True, None
+
+
+def _remember_path(path: Path, *, created: bool) -> None:
+    """SET-07: закрепить открытую базу для следующего запуска.
+
+    Указатель пишется только когда путь отличается от пути по умолчанию:
+    иначе он дублировал бы уже действующее правило и мешал тестам с
+    временными каталогами.
+    """
+    try:
+        if Path(path) != default_db_path():
+            write_pointer(path)
+    except OSError:  # pragma: no cover - каталог недоступен, работаем как раньше
+        logging.getLogger(__name__).warning(
+            "Не удалось запомнить путь к базе: %s", path
+        )
 
 
 def _backup_old_database(path: Path, stored_version: int) -> Path:
@@ -121,6 +152,52 @@ def _backup_old_database(path: Path, stored_version: int) -> Path:
     )
     shutil.copy2(path, backup)
     return backup
+
+
+def _translation_directories() -> list[Path]:
+    """Каталоги с переводами Qt: из установленного PySide6 и из сборки exe."""
+    from PySide6 import QtCore
+    from PySide6.QtCore import QLibraryInfo
+
+    candidates = [Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))]
+    try:
+        candidates.append(Path(QtCore.__file__).resolve().parent / "translations")
+    except (AttributeError, OSError):
+        pass
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        candidates.append(Path(bundle) / "PySide6" / "translations")
+    return candidates
+
+
+def install_russian_translations(app) -> bool:
+    """UI-14: штатные меню и подписи Qt — на русском языке.
+
+    Без транслятора контекстное меню полей ввода (Отменить/Вырезать/Копировать/
+    Вставить), меню календаря и заголовков таблиц остаются английскими: своих
+    пунктов в этих меню приложение не создаёт.
+    """
+    from PySide6.QtCore import QLocale, QTranslator
+
+    log = logging.getLogger(__name__)
+    locale = QLocale("ru_RU")
+    for directory in _translation_directories():
+        if not (directory / "qtbase_ru.qm").is_file():
+            continue
+        installed = False
+        for name in ("qtbase", "qt", "qt_help"):
+            if not (directory / f"{name}_ru.qm").is_file():
+                continue
+            translator = QTranslator(app)  # родитель app: живёт до выхода
+            if translator.load(locale, name, "_", str(directory)):
+                app.installTranslator(translator)
+                installed = True
+        if installed:
+            log.info("Переводы Qt загружены из %s", directory)
+            return True
+        log.warning("Переводы Qt найдены, но не загрузились: %s", directory)
+    log.warning("Переводы Qt (qtbase_ru.qm) не найдены — меню останутся английскими")
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,6 +215,9 @@ def main(argv: list[str] | None = None) -> int:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     app = QApplication(argv)
+    # UI-14: до первого окна — иначе штатные меню и подписи кнопок Qt
+    # (контекстное меню полей ввода, календарь, таблицы) останутся английскими.
+    install_russian_translations(app)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
@@ -161,6 +241,17 @@ def main(argv: list[str] | None = None) -> int:
 
     from .ui.first_run import FirstRunWizard
     from .ui.main_window import MainWindow
+    from .ui.theme import theme_manager
+
+    # UI-13: сохранённая тема применяется до первого окна, иначе мастер
+    # первого запуска и сообщения об ошибках открылись бы в теме по умолчанию,
+    # а затем интерфейс «мигнул» бы другой палитрой.
+    theme_manager(db).load(app=app)
+
+    # SET-02: формат даты и времени из настроек действует с первого экрана.
+    from .core.settings_service import SettingsService
+
+    SettingsService(db).apply_display_formats()
 
     if created:
         # FIRST-03…FIRST-15: мастер первого запуска.

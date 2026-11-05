@@ -764,6 +764,33 @@ class BellRepository:
                             field="parts",
                         )
 
+    def rename_slot(
+        self,
+        slot_id: int,
+        *,
+        name: str | None = None,
+        pair_no: int | None = None,
+    ) -> BellSlot:
+        """BELL-12: изменить подпись и номер пары блока.
+
+        Отдельно от ``update_slot_parts``: у блока есть собственные поля, и
+        правка только названия не должна переписывать части (иначе проверка
+        пересечений BELL-17 срабатывала бы на каждое переименование).
+        """
+        row = self.db.fetchone("SELECT * FROM bell_slots WHERE id = ?", (slot_id,))
+        if row is None:
+            raise NotFoundError("Блок звонков не найден")
+        with self.db.transaction() as conn:
+            conn.execute(
+                "UPDATE bell_slots SET display_name = ?, pair_no = ? WHERE id = ?",
+                (
+                    (name or "").strip() or None if name is not None else row["display_name"],
+                    pair_no if pair_no is not None else row["pair_no"],
+                    slot_id,
+                ),
+            )
+        return self._slot(slot_id)
+
     def update_slot_parts(self, slot_id: int, parts: Iterable[tuple[str, str, str]]) -> BellSlot:
         """BELL-12/BELL-15: правка частей с проверкой пересечений (BELL-17)."""
         slot_row = self.db.fetchone("SELECT * FROM bell_slots WHERE id = ?", (slot_id,))
@@ -802,6 +829,19 @@ class BellRepository:
                 )
         with self.db.transaction() as conn:
             conn.execute("DELETE FROM bell_slots WHERE id = ?", (slot_id,))
+            # BELL-16: вместе с блоком убираются ячейки шаблона и правки этой
+            # позиции. Иначе номер слота переиспользуется новым блоком
+            # (``slot_no = max + 1``), и новый «пустой» блок наследует предмет
+            # удалённого: пользователь видит чужую пару в только что
+            # созданном слоте.
+            conn.execute(
+                "DELETE FROM schedule_templates WHERE profile_id = ? AND slot_no = ?",
+                (profile_id, slot_no),
+            )
+            conn.execute(
+                "DELETE FROM schedule_overrides WHERE profile_id = ? AND slot_no = ?",
+                (profile_id, slot_no),
+            )
 
     def _slot_references(self, profile_id: int, slot_no: int) -> str:
         templates = self.db.scalar(
@@ -882,7 +922,7 @@ def _cell(row: Any) -> TemplateCell:
     keys = row.keys()
     return TemplateCell(
         id=row["id"], profile_id=row["profile_id"], week_type=row["week_type"],
-        slot_no=int(row["slot_no"]), subject_id=row["subject_id"], group_mark=row["group_mark"],
+        slot_no=int(row["slot_no"]), subject_id=row["subject_id"],
         effective_from=_date(row["effective_from"]) if "effective_from" in keys else None,
     )
 
@@ -896,7 +936,7 @@ LATEST_DUE_DATE = "9999-12-31"
 class ScheduleTemplateRepository:
     """Шаблон недели с историей правок (TPL-01, TPL-08).
 
-    На позицию ``(profile_id, week_type, slot_no, group_mark)`` хранится не одна
+    На позицию ``(profile_id, week_type, slot_no)`` хранится не одна
     строка, а цепочка версий по ``effective_from``. Чтение возвращает версию,
     действующую на запрошенную дату, поэтому правка сетки перестаёт менять
     прошлые недели. Строка с ``subject_id IS NULL`` — явная очистка
@@ -927,7 +967,7 @@ class ScheduleTemplateRepository:
             "AND t.effective_from = ("
             "  SELECT MAX(x.effective_from) FROM schedule_templates x "
             "  WHERE x.profile_id = t.profile_id AND x.week_type = t.week_type "
-            "    AND x.slot_no = t.slot_no AND x.group_mark IS t.group_mark "
+            "    AND x.slot_no = t.slot_no "
             "    AND x.effective_from <= ?"
             ") "
         )
@@ -947,11 +987,12 @@ class ScheduleTemplateRepository:
         on_date: date | str | None = None,
     ) -> TemplateCell | None:
         """Версия ячейки, действующая на дату (TPL-08)."""
+        limit = self._on_date(on_date)
         row = self.db.fetchone(
             "SELECT * FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-            "AND slot_no = ? AND group_mark IS NULL AND effective_from <= ? "
+            "AND slot_no = ? AND effective_from <= ? "
             "ORDER BY effective_from DESC LIMIT 1",
-            (profile_id, week_type, slot_no, self._on_date(on_date)),
+            (profile_id, week_type, slot_no, limit),
         )
         return _cell(row) if row else None
 
@@ -974,7 +1015,7 @@ class ScheduleTemplateRepository:
             _cell(row)
             for row in self.db.fetchall(
                 "SELECT * FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                "AND slot_no = ? AND group_mark IS NULL ORDER BY effective_from",
+                "AND slot_no = ? ORDER BY effective_from",
                 (profile_id, week_type, slot_no),
             )
         ]
@@ -998,20 +1039,26 @@ class ScheduleTemplateRepository:
         if week_type not in (WeekType.UPPER, WeekType.LOWER):
             raise ValidationError("Тип недели: только upper или lower.", field="week_type")
         if subject_id is None:
-            self.clear_cell(profile_id, week_type, slot_no, effective_from=effective_from)
+            self.clear_cell(
+                profile_id, week_type, slot_no,
+                effective_from=effective_from,
+            )
             return None
 
         start = BASE_DUE_DATE if effective_from is None else self._on_date(effective_from)
         with self.db.transaction() as conn:
             conn.execute(
                 "DELETE FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                "AND slot_no = ? AND group_mark IS NULL AND effective_from >= ?",
+                "AND slot_no = ? AND effective_from >= ?",
                 (profile_id, week_type, slot_no, start),
             )
             conn.execute(
                 "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
-                "group_mark, subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
-                (profile_id, week_type, slot_no, subject_id, start),
+                "subject_id, effective_from) VALUES (?, ?, ?, ?, ?)",
+                (
+                    profile_id, week_type, slot_no,
+                    subject_id, start,
+                ),
             )
         return self.cell(profile_id, week_type, slot_no, on_date=start)
 
@@ -1032,7 +1079,7 @@ class ScheduleTemplateRepository:
             with self.db.transaction() as conn:
                 conn.execute(
                     "DELETE FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                    "AND slot_no = ? AND group_mark IS NULL",
+                    "AND slot_no = ?",
                     (profile_id, week_type, slot_no),
                 )
             return
@@ -1041,13 +1088,13 @@ class ScheduleTemplateRepository:
         with self.db.transaction() as conn:
             conn.execute(
                 "DELETE FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                "AND slot_no = ? AND group_mark IS NULL AND effective_from >= ?",
+                "AND slot_no = ? AND effective_from >= ?",
                 (profile_id, week_type, slot_no, start),
             )
             # Надгробие нужно, только если раньше было что скрывать.
             earlier = conn.execute(
                 "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                "AND slot_no = ? AND group_mark IS NULL AND subject_id IS NOT NULL "
+                "AND slot_no = ? AND subject_id IS NOT NULL "
                 "AND effective_from < ? LIMIT 1",
                 (profile_id, week_type, slot_no, start),
             ).fetchone()
@@ -1055,7 +1102,7 @@ class ScheduleTemplateRepository:
                 return
             conn.execute(
                 "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
-                "group_mark, subject_id, effective_from) VALUES (?, ?, ?, NULL, NULL, ?)",
+                "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?)",
                 (profile_id, week_type, slot_no, start),
             )
 
@@ -1085,16 +1132,38 @@ class ScheduleTemplateRepository:
                     "DELETE FROM schedule_templates WHERE week_type = ?", (week_type,)
                 )
             else:
-                # Позиции, которых нет в новом наборе, тоже нужно очистить —
-                # иначе они «протекут» в новую версию недели.
+                # Позиции, которых нет в новом наборе, тоже нужно перекрыть.
+                # Одного DELETE недостаточно: базовые строки с
+                # ``effective_from = 0001-01-01`` переживают удаление (оно
+                # ограничено ``>= start``) и снова становятся действующими,
+                # поэтому удалённые из набора пары оставались в расписании.
+                # Поэтому сначала собираем позиции, которые уже существуют в
+                # прошлом и не попали в набор, и ставим им надгробия.
+                keep = {(profile_id, slot_no) for profile_id, slot_no, _ in rows}
+                existing = conn.execute(
+                    "SELECT DISTINCT profile_id, slot_no FROM schedule_templates "
+                    "WHERE week_type = ?",
+                    (week_type,),
+                ).fetchall()
+                stale = [
+                    (row["profile_id"], row["slot_no"])
+                    for row in existing
+                    if (row["profile_id"], row["slot_no"]) not in keep
+                ]
                 conn.execute(
                     "DELETE FROM schedule_templates WHERE week_type = ? AND effective_from >= ?",
                     (week_type, start),
                 )
+                for profile_id, slot_no in stale:
+                    conn.execute(
+                        "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                        "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?)",
+                        (profile_id, week_type, slot_no, start),
+                    )
             for profile_id, slot_no, subject_id in rows:
                 conn.execute(
-                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                    "subject_id, effective_from) VALUES (?, ?, ?, ?, ?)",
                     (profile_id, week_type, slot_no, subject_id, start),
                 )
         return len(rows)
@@ -1106,14 +1175,14 @@ class ScheduleTemplateRepository:
             for profile_id, slot_no, subject_id in entries:
                 exists = conn.execute(
                     "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                    "AND slot_no = ? AND group_mark IS NULL",
+                    "AND slot_no = ?",
                     (profile_id, week_type, slot_no),
                 ).fetchone()
                 if exists:
                     continue
                 conn.execute(
-                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                    "subject_id, effective_from) VALUES (?, ?, ?, ?, ?)",
                     (profile_id, week_type, slot_no, subject_id, BASE_DUE_DATE),
                 )
                 added += 1
@@ -1148,7 +1217,6 @@ def _override(row: Any) -> ScheduleOverride:
         keep_original=int(row["keep_original"]),
         comment=row["comment"],
         created_at=row["created_at"],
-        group_mark=row["group_mark"],
         part_seq=row["part_seq"],
     )
 
@@ -1233,7 +1301,7 @@ class ScheduleOverrideRepository:
             # Не более одного оверрайда из cancel/replace на (date, profile, slot) — OVR-08.
             existing = self.db.fetchone(
                 "SELECT id, override_type FROM schedule_overrides WHERE date = ? AND profile_id = ? "
-                "AND slot_no = ? AND group_mark IS NULL AND override_type IN ('cancel','replace')",
+                "AND slot_no = ? AND override_type IN ('cancel','replace')",
                 (dt.to_iso(day), profile_id, slot_no),
             )
             if existing is not None:
@@ -1262,12 +1330,17 @@ class ScheduleOverrideRepository:
             # пользователь не мог вернуть занятие в освободившийся блок.
             cancelled = self.db.fetchone(
                 "SELECT 1 FROM schedule_overrides WHERE date = ? AND profile_id = ? "
-                "AND slot_no = ? AND group_mark IS NULL AND override_type = 'cancel'",
+                "AND slot_no = ? AND override_type = 'cancel'",
                 (dt.to_iso(day), profile_id, slot_no),
             )
             if template_exists is not None:
                 occupied = bool(template_exists)
             else:
+                # TPL-08: занятость определяется **действующей** версией ячейки,
+                # а не любой исторической. ``_has_template`` смотрел на любую
+                # старую строку и не замечал надгробие: после «Очистить» в
+                # редакторе сетки блок оставался «занятым», добавление пары
+                # отклонялось с OVR-08, а отмена была разрешена — тупик.
                 occupied = self._has_template(profile_id, day, slot_no)
             if (occupied or template_subject_id is not None) and cancelled is None:
                 raise RuleViolationError(
@@ -1282,7 +1355,7 @@ class ScheduleOverrideRepository:
                 with self.db.transaction() as conn:
                     conn.execute(
                         "DELETE FROM schedule_overrides WHERE date = ? AND profile_id = ? "
-                        "AND slot_no = ? AND group_mark IS NULL AND override_type = 'cancel'",
+                        "AND slot_no = ? AND override_type = 'cancel'",
                         (dt.to_iso(day), profile_id, slot_no),
                     )
                 override_type = OverrideType.REPLACE
@@ -1291,14 +1364,14 @@ class ScheduleOverrideRepository:
                 with self.db.transaction() as conn:
                     conn.execute(
                         "DELETE FROM schedule_overrides WHERE date = ? AND profile_id = ? "
-                        "AND slot_no = ? AND group_mark IS NULL AND override_type = 'cancel'",
+                        "AND slot_no = ? AND override_type = 'cancel'",
                         (dt.to_iso(day), profile_id, slot_no),
                     )
             # Второй add на тот же блок дал бы две пары в одном слоте: одна
             # показывалась бы, вторая висела бы скрытым дублем.
             existing_add = self.db.fetchone(
                 "SELECT id FROM schedule_overrides WHERE date = ? AND profile_id = ? "
-                "AND slot_no = ? AND group_mark IS NULL AND override_type = 'add'",
+                "AND slot_no = ? AND override_type = 'add'",
                 (dt.to_iso(day), profile_id, slot_no),
             )
             if existing_add is not None:
@@ -1308,10 +1381,10 @@ class ScheduleOverrideRepository:
                 )
         with self.db.transaction() as conn:
             cursor = conn.execute(
-                "INSERT INTO schedule_overrides(date, profile_id, slot_no, group_mark, part_seq, "
+                "INSERT INTO schedule_overrides(date, profile_id, slot_no, part_seq, "
                 "override_type, subject_id, teacher, room, custom_start, custom_end, "
                 "target_slot_no, keep_original, comment, created_at) "
-                "VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     dt.to_iso(day), profile_id, slot_no, override_type, subject_id,
                     (teacher or "").strip() or None, (room or "").strip() or None,
@@ -1421,13 +1494,21 @@ class ScheduleOverrideRepository:
     def _has_template_on(
         self, profile_id: int, week_type: str, slot_no: int, value: date
     ) -> bool:
-        """TPL-08: занятие есть в версии шаблона, действующей на эту дату."""
+        """TPL-08: занятие есть в версии шаблона, действующей на эту дату.
+
+        Учитывается **последняя** версия позиции: если позже стоит надгробие
+        (``subject_id IS NULL``), занятие считается отсутствующим. Раньше
+        достаточно было любой исторической версии с предметом, поэтому после
+        «Очистить» в редакторе сетки блок оставался занятым: добавление пары
+        отклонялось (OVR-08), хотя место свободно.
+        """
         row = self.db.fetchone(
-            "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-            "AND slot_no = ? AND subject_id IS NOT NULL AND effective_from <= ? LIMIT 1",
+            "SELECT subject_id FROM schedule_templates WHERE profile_id = ? "
+            "AND week_type = ? AND slot_no = ? "
+            "AND effective_from <= ? ORDER BY effective_from DESC LIMIT 1",
             (profile_id, week_type, slot_no, dt.to_iso(value)),
         )
-        return row is not None
+        return row is not None and row["subject_id"] is not None
 
     def delete_orphans(self, *, week_type_for_date: Any = None) -> list[ScheduleOverride]:
         """ALG-10 п. 5: массовое удаление сиротских одной кнопкой."""

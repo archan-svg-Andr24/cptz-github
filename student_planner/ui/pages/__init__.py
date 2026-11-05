@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from .exams import ExamsPage
 from .expenses import ExpensesPage
 from .homework import HomeworkPage
 from .schedule import SchedulePage
@@ -18,5 +19,6 @@ __all__ = [
     "TripsPage",
     "ExpensesPage",
     "HomeworkPage",
+    "ExamsPage",
     "SettingsPage",
 ]

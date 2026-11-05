@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta
+from typing import final
 
 from .errors import ValidationError
 
@@ -16,6 +17,17 @@ ISO_FORMAT = "%Y-%m-%d"
 #: Формат отображения по умолчанию (``date_display_format`` §30).
 DEFAULT_DISPLAY_FORMAT = "DD.MM.YYYY"
 DEFAULT_TIME_FORMAT = "HH:MM"
+
+#: Допустимые значения настройки формата даты (SET-02).
+DISPLAY_FORMATS: final[tuple[str, ...]] = ("DD.MM.YYYY", "YYYY-MM-DD", "DD.MM.YY")
+#: Допустимые значения настройки формата времени.
+TIME_FORMATS: final[tuple[str, ...]] = ("HH:MM", "HH:MM:SS")
+
+#: Действующий формат отображения. Пустая строка — «не задан», тогда работает
+#: значение по умолчанию. Заполняется из настроек при запуске и при смене
+#: настройки на странице «Настройки» (см. :func:`set_display_format`).
+_active_display_format: str = ""
+_active_time_format: str = ""
 
 WEEKDAY_NAMES: dict[int, str] = {
     1: "Понедельник",
@@ -108,27 +120,79 @@ def _to_strftime(fmt: str) -> str:
     return result
 
 
-def format_display(value: date | None, fmt: str = DEFAULT_DISPLAY_FORMAT) -> str:
-    """Дата → строка интерфейса (по умолчанию ``ДД.ММ.ГГГГ``)."""
+def format_display(value: date | None, fmt: str | None = None) -> str:
+    """Дата → строка интерфейса.
+
+    ``fmt=None`` означает «действующий формат приложения»: он задаётся
+    настройкой ``date_display_format`` через :func:`set_display_format`.
+    Пока настройка не прочитана, работает ``ДД.ММ.ГГГГ``.
+    """
     if value is None:
         return ""
+    resolved = fmt or _active_display_format or DEFAULT_DISPLAY_FORMAT
     try:
-        return value.strftime(_to_strftime(fmt or DEFAULT_DISPLAY_FORMAT))
+        return value.strftime(_to_strftime(resolved))
     except ValueError:
         return value.strftime("%d.%m.%Y")
 
 
-def parse_display(text: str, fmt: str = DEFAULT_DISPLAY_FORMAT) -> date:
+def parse_display(text: str, fmt: str | None = None) -> date:
     """Разобрать дату из поля ввода интерфейса."""
     cleaned = (text or "").strip()
     if not cleaned:
         raise ValidationError("Дата не задана", field="date")
-    for candidate in (_to_strftime(fmt or DEFAULT_DISPLAY_FORMAT), "%d.%m.%Y", ISO_FORMAT):
+    resolved = fmt or _active_display_format or DEFAULT_DISPLAY_FORMAT
+    for candidate in (_to_strftime(resolved), "%d.%m.%Y", ISO_FORMAT):
         try:
             return datetime.strptime(cleaned, candidate).date()
         except ValueError:
             continue
     raise ValidationError(f"Некорректная дата: {text!r}", field="date")
+
+
+def set_display_format(fmt: str | None) -> None:
+    """SET-02: применить выбранный в настройках формат даты ко всему UI.
+
+    Формат — глобальная настройка отображения, а не свойство отдельного окна:
+    держим его в модуле, чтобы ``format_display()`` без аргументов давал
+    ровно то, что выбрал пользователь. Неизвестный формат игнорируется.
+    """
+    global _active_display_format
+    value = (fmt or "").strip()
+    _active_display_format = value if value in DISPLAY_FORMATS else ""
+
+
+def active_display_format() -> str:
+    """Действующий формат даты (``DD.MM.YYYY``, если не задан)."""
+    return _active_display_format or DEFAULT_DISPLAY_FORMAT
+
+
+def set_time_format(fmt: str | None) -> None:
+    """SET-02: применить выбранный формат времени (``HH:MM``/``HH:MM:SS``)."""
+    global _active_time_format
+    value = (fmt or "").strip()
+    _active_time_format = value if value in TIME_FORMATS else ""
+
+
+def active_time_format() -> str:
+    """Действующий формат времени."""
+    return _active_time_format or DEFAULT_TIME_FORMAT
+
+
+def format_time_display(value: str | None, fmt: str | None = None) -> str:
+    """Время ``ЧЧ:ММ`` → строка по действующему формату.
+
+    Хранится время всегда как ``ЧЧ:ММ`` (схема БД); настройка влияет только
+    на показ. ``HH:MM:SS`` добавляет секунды — они всегда нулевые, потому что
+    в сетке звонков секунд нет.
+    """
+    if not value:
+        return ""
+    cleaned = str(value).strip()
+    resolved = fmt or _active_time_format or DEFAULT_TIME_FORMAT
+    if resolved == "HH:MM:SS" and len(cleaned) == 5:
+        return f"{cleaned}:00"
+    return cleaned[:5] if len(cleaned) > 5 else cleaned
 
 
 def monday_of(value: date) -> date:
@@ -200,6 +264,8 @@ __all__ = [
     "ISO_FORMAT",
     "DEFAULT_DISPLAY_FORMAT",
     "DEFAULT_TIME_FORMAT",
+    "DISPLAY_FORMATS",
+    "TIME_FORMATS",
     "WEEKDAY_NAMES",
     "WEEKDAY_SHORT",
     "MONTH_NAMES",
@@ -211,6 +277,11 @@ __all__ = [
     "today_iso",
     "format_display",
     "parse_display",
+    "set_display_format",
+    "active_display_format",
+    "set_time_format",
+    "active_time_format",
+    "format_time_display",
     "monday_of",
     "week_dates",
     "add_days",

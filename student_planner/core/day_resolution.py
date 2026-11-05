@@ -45,6 +45,19 @@ from .transport_repositories import HomeworkRepository, TripConfirmationReposito
 from .weektype import week_type_for
 
 
+def _safe_date(ordinal: int) -> date | None:
+    """Дата по номеру или ``None``, если номер вне допустимого диапазона.
+
+    ``date.fromordinal`` бросает ``ValueError`` для значений за пределами
+    ``date.min``…``date.max``. Неделя вокруг 1 января 1-го года или вокруг
+    31 декабря 9999-го выходит за эти границы — такие дни просто не
+    существуют, и вместо исключения их нужно пропустить.
+    """
+    if date.min.toordinal() <= ordinal <= date.max.toordinal():
+        return date.fromordinal(ordinal)
+    return None
+
+
 @dataclass
 class _Context:
     """Кэш справочников на один вызов разрешения дня."""
@@ -92,8 +105,32 @@ class DayResolver:
         return self._periods.covering(when, no_classes_only=True)
 
     def profile_for(self, when: date) -> BellProfile | None:
-        """Профиль звонков, действующий на дату (BELL-18)."""
-        return self._bells.profile_for(when)
+        """Профиль звонков, действующий на дату (BELL-18, TPL-05)."""
+        return self._bells.profile_for(when, variant=self._bell_variant(when))
+
+    def friday_variant_for(self, when: date) -> str:
+        """TPL-05: вариант профиля для даты.
+
+        По пятницам профиль может быть особым (``friday_class_hour`` — пятница
+        с классным часом и укороченными парами). Настройка
+        ``friday_default_variant`` задаёт, какой вариант действует по
+        умолчанию; для остальных дней всегда ``default``.
+        """
+        if when.isoweekday() != 5:
+            return "default"
+        try:
+            from .settings_registry import SettingsKeys
+            from .settings_service import SettingsService
+
+            stored = SettingsService(self.db).raw(SettingsKeys.FRIDAY_DEFAULT_VARIANT)
+        except Exception:  # pragma: no cover - защита разрешения дня
+            return "default"
+        return stored if stored in ("standard", "friday_class_hour") else "standard"
+
+    def _bell_variant(self, when: date) -> str:
+        """Имя варианта профиля: настройка «standard» = обычный ``default``."""
+        variant = self.friday_variant_for(when)
+        return "default" if variant == "standard" else variant
 
     # ------------------------------------------------------------- разрешение
     def resolve(self, when: date) -> DayResolution:
@@ -131,7 +168,7 @@ class DayResolver:
                 reason="Воскресенье",
             )
 
-        profile = self._bells.profile_for(when)
+        profile = self._bells.profile_for(when, variant=self._bell_variant(when))
         if profile is None:
             return DayResolution(
                 date=when,
@@ -145,12 +182,14 @@ class DayResolver:
         # --- Шаг 3: шаблон недели на эту дату -------------------------------
         # TPL-08: шаблон версионный, поэтому читаем версию, действующую именно
         # на разрешаемую дату, а не «текущую».
-        template = {
-            cell.slot_no: cell
-            for cell in self._templates.cells(
-                week_type or WeekType.LOWER, profile_id=profile.id, on_date=when
-            )
-        }
+        cells = self._templates.cells(
+            week_type or WeekType.LOWER,
+            profile_id=profile.id,
+            on_date=when,
+        )
+        template: dict[int, object] = {}
+        for cell in cells:
+            template[cell.slot_no] = cell
         overrides = {
             item.slot_no: item for item in self._overrides.for_date(when, profile_id=profile.id)
         }
@@ -211,15 +250,31 @@ class DayResolver:
         )
 
     def resolve_week(self, start: date) -> list[DayResolution]:
-        """Неделя Пн–Вс от ``start``: текущая, следующая или выбранная (SCH-02)."""
+        """Неделя Пн–Вс от ``start``: текущая, следующая или выбранная (SCH-02).
+
+        Даты за пределами ``date.min``/``date.max`` пропускаются: для недели,
+        начинающейся 1 января 1-го года, ведущих дней просто не существует.
+        """
         monday = monday_of(start)
-        return [self.resolve(date.fromordinal(monday.toordinal() + offset)) for offset in range(7)]
+        return [
+            self.resolve(value)
+            for value in (
+                _safe_date(monday.toordinal() + offset) for offset in range(7)
+            )
+            if value is not None
+        ]
 
     def resolve_range(self, start: date, end: date) -> list[DayResolution]:
         if end < start:
             return []
-        return [self.resolve(date.fromordinal(start.toordinal() + offset))
-                for offset in range((end - start).days + 1)]
+        return [
+            self.resolve(value)
+            for value in (
+                _safe_date(start.toordinal() + offset)
+                for offset in range((end - start).days + 1)
+            )
+            if value is not None
+        ]
 
     # ------------------------------------------------------------- занятия
     def _build_lesson(
@@ -325,11 +380,21 @@ class DayResolver:
         )
 
     def _homework_count(self, subject_id: int | None, when: date, context: _Context) -> int:
-        """HW-06: бейдж ДЗ на карточке занятия того же предмета в день сдачи."""
+        """HW-06: бейдж ДЗ на карточке занятия того же предмета в день сдачи.
+
+        Считаются только **активные** задания — ровно как в
+        ``HomeworkService.badge``. Раньше здесь учитывались и выполненные:
+        бейдж на карточке показывал «2», а страница заданий — «1», и цифры
+        расходились на одном и том же дне.
+        """
         if subject_id is None:
             return 0
         # Не кэшируем по дате ради простоты: заданий мало, а индекс по due_date есть.
-        return len(self._homework.for_subject_date(subject_id, when))
+        return sum(
+            1
+            for item in self._homework.for_subject_date(subject_id, when)
+            if item.is_active
+        )
 
     def _is_orphan(
         self,
@@ -373,6 +438,12 @@ class DayResolver:
             add(day, "ride")
         for day in HomeworkRepository(self.db).due_dates(start, end):
             add(day, "homework")
+        # EXAM-06: метка на дате испытания — иначе экзамен виден только на
+        # своей странице, а в календаре день выглядит обычным.
+        from .exam_repository import ExamRepository
+
+        for day in ExamRepository(self.db).dates_with_exams(start, end):
+            add(day, "exam")
         return marks
 
 

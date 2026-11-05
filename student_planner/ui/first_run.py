@@ -43,7 +43,6 @@ from ..core.errors import AppError
 from ..core.settings_registry import SettingsKeys
 from ..core.settings_service import SettingsService
 from ..core.transport_service import WalletService
-from .theme import COLORS, stylesheet
 from .widgets import Card, MetricRow, Separator
 
 log = logging.getLogger(__name__)
@@ -58,13 +57,16 @@ STEPS = (
 
 
 class FirstRunWizard(QDialog):
-    """Мастер первого запуска: четыре шага, каждый можно пропустить."""
+    """Мастер первого запуска: четыре шага, каждый можно пропустить.
+
+    Своей таблицы стилей нет: тема применена к ``QApplication``, поэтому мастер
+    получает её автоматически — и открывается уже в сохранённой теме.
+    """
 
     def __init__(self, db, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.db = db
         self.settings = SettingsService(db)
-        self.setStyleSheet(stylesheet())
         self.setWindowTitle("Первый запуск")
         self.setModal(True)
         self.resize(600, 470)

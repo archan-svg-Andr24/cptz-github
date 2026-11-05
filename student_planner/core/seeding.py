@@ -68,7 +68,7 @@ class Seeder:
             summary_counts["cells_added"] = self._templates(conn, subject_ids, profile_ids, slot_nos)
             summary_counts["tariffs_added"] = self._tariffs(conn)
             summary_counts["templates_added"] = self._trip_templates(conn)
-        result = seed.SeedSummary(**summary_counts)  # type: ignore[arg-type]
+            result = seed.SeedSummary(**summary_counts)  # type: ignore[arg-type]
         log.info("Стартовый набор загружен: %s записей", result.total)
         return result
 
@@ -208,14 +208,14 @@ class Seeder:
                         continue
                     exists = conn.execute(
                         "SELECT 1 FROM schedule_templates WHERE profile_id = ? AND week_type = ? "
-                        "AND slot_no = ? AND group_mark IS NULL",
+                        "AND slot_no = ?",
                         (profile_id, week_type, slot_no),
                     ).fetchone()
                     if exists:
                         continue
                     conn.execute(
-                        "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                        "subject_id, effective_from) VALUES (?, ?, ?, NULL, ?, ?)",
+                        "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                        "subject_id, effective_from) VALUES (?, ?, ?, ?, ?)",
                         (profile_id, week_type, slot_no, subject_id, BASE_DUE_DATE),
                     )
                     added += 1

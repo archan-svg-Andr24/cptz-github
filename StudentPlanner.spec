@@ -16,11 +16,32 @@ ROOT = Path(SPECPATH).resolve()
 
 hidden = collect_submodules("student_planner")
 
+# UI-14: переводы Qt (qtbase_ru.qm) нужны и в сборке — иначе в exe штатные
+# контекстные меню и подписи кнопок Qt останутся английскими.
+try:
+    import PySide6
+    from PySide6.QtCore import QLibraryInfo
+
+    _qt_translations = Path(
+        QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    )
+    if not _qt_translations.is_dir():
+        _qt_translations = Path(PySide6.__file__).resolve().parent / "translations"
+except Exception:  # pragma: no cover - сборка без PySide6 невозможна
+    _qt_translations = Path()
+
+datas = []
+if _qt_translations.is_dir():
+    for _qm in _qt_translations.glob("*_ru.qm"):
+        datas.append((str(_qm), "PySide6/translations"))
+else:
+    print("WARNING: переводы Qt не найдены, меню в exe будут на английском")
+
 a = Analysis(
     [str(ROOT / "StudentPlanner.py")],
     pathex=[str(ROOT)],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hidden,
     hookspath=[],
     hooksconfig={},

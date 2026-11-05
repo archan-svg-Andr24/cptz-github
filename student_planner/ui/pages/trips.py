@@ -35,8 +35,15 @@ from ...core.models import Direction, PaymentMethod, TransportType
 from ...core.transport_service import TransportService
 from ...core.trip_service import TripPlanService
 from ..dialogs import BaseDialog, ConfirmTripsDialog, ManualRideDialog
-from ..theme import COLORS
-from ..widgets import Badge, Card, EmptyState, MetricRow, SectionHeader, Separator
+from ..widgets import (
+    Badge,
+    Card,
+    EmptyState,
+    FlowLayout,
+    MetricRow,
+    SectionHeader,
+    Separator,
+)
 
 
 def _make_compact(combo: QComboBox) -> None:
@@ -671,7 +678,14 @@ class ConfirmTab(QWidget):
         self.return_row.set_value(
             plan.return_trip.name if plan.return_trip else "не выбрано"
         )
-        self.counter_row.set_value(f"{plan.legs_count} поездок")
+        # TRIP-07: влияние на счётчик считается по выбранному набору, а не по
+        # уже сохранённым рейсам — до подтверждения их ещё нет. «Стрелочных»
+        # ног столько же, сколько номеров в предварительном расчёте.
+        if plan.estimated_numbers:
+            numbers = ", ".join(f"№{n}" for n in plan.estimated_numbers)
+            self.counter_row.set_value(f"{plan.legs_count} поездок ({numbers})")
+        else:
+            self.counter_row.set_value(f"{plan.legs_count} поездок")
 
         if plan.is_confirmed:
             self.state_badge.setText("подтверждено")
@@ -702,14 +716,39 @@ class ConfirmTab(QWidget):
                 line.setObjectName("Small")
                 self.rides_layout.addWidget(line)
             self.total_row.set_value(f"{total} ₽")
-            self.balance_row.set_value(
-                f"{TransportService(self.db).strella_state().balance} ₽"
-            )
+            balance = TransportService(self.db).strella_state().balance
+            self.balance_row.set_value(f"{balance} ₽" if balance is not None else "—")
             self.rides_card.setVisible(True)
             self.empty.setVisible(False)
         else:
-            self.total_row.set_value("—")
-            self.balance_row.set_value("—")
+            # TRIP-07: до подтверждения показываем **предварительный** расчёт по
+            # выбранным шаблонам. Раньше здесь стояли прочерки, и блок «Расчёт»
+            # не давал никакой полезной информации — пользователь не знал ни
+            # стоимости, ни остатка после поездок.
+            if plan.has_estimate:
+                self.total_row.set_value(f"{plan.estimated_total} ₽")
+                self.total_row.set_kind("")
+                if plan.estimated_balance is None:
+                    self.balance_row.set_value("—")
+                else:
+                    self.balance_row.set_value(f"{plan.estimated_balance} ₽")
+                    self.balance_row.set_kind(
+                        "error" if plan.estimated_balance < 0 else ""
+                    )
+                self.total_row.setToolTip(
+                    "Предварительная стоимость выбранных поездок (до подтверждения)"
+                )
+                self.balance_row.setToolTip(
+                    "Остаток «Стрелки» после подтверждения этих поездок"
+                )
+            else:
+                self.total_row.set_value("—")
+                self.total_row.setToolTip(
+                    "Выберите шаблоны поездок, чтобы увидеть стоимость"
+                )
+                self.balance_row.set_value("—")
+                self.balance_row.set_kind("")
+                self.balance_row.setToolTip("")
             self.rides_card.setVisible(False)
             self.empty.setVisible(True)
 
@@ -757,7 +796,7 @@ class JournalTab(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        filters = QHBoxLayout()
+        filters = FlowLayout()
         filters.setSpacing(8)
 
         self.period_combo = QComboBox()
@@ -781,8 +820,6 @@ class JournalTab(QWidget):
             self.transport_combo.addItem(TransportType.label(value), value)
         self.transport_combo.currentIndexChanged.connect(self.refresh)
         filters.addWidget(self.transport_combo)
-
-        filters.addStretch(1)
 
         self.add_button = QPushButton("Добавить поездку…")
         self.add_button.setObjectName("Primary")

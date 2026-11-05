@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...core import clock
+from ...core.exam_service import ExamService
 from ...core.dates import (
     MONTH_NAMES_NOMINATIVE,
     WEEKDAY_NAMES,
@@ -37,16 +38,18 @@ from ...core.day_resolution import DayResolver
 from ...core.errors import AppError
 from ...core.models import LessonStatus
 from ...core.schedule_service import CalendarService, OverrideService
+from ...core.subject_names import SubjectNameService
 from ..dialogs import (
     AddLessonDialog,
     CancelLessonDialog,
     ReplaceLessonDialog,
 )
 from ..grid_editor import GridEditorDialog
-from ..theme import COLORS
+from ..theme import FONT_FAMILY, subject_color_index
 from ..widgets import (
     Card,
     EmptyState,
+    FlowLayout,
     SectionHeader,
     Separator,
     WarningBanner,
@@ -62,24 +65,50 @@ MODES = (
     ("next", "Следующая неделя"),
 )
 
+#: UI-14: предел длины подписи предмета в колонке дня (символов).
+#: Даже при выключенных сокращениях более длинное название режется по границе
+#: слова: колонка дня в недельном режиме уже 200 px. Предел взят с запасом,
+#: чтобы самое длинное название стартового набора
+#: («Иностранный язык в профессиональной деятельности», 49 символов) читалось
+#: целиком — пользователь, выключивший сокращения, должен видеть полный текст.
+SUBJECT_CAPTION_LIMIT = 50
+
 
 class LessonCard(QFrame):
-    """SCH-04/SCH-11: карточка занятия с временем, предметом, статусом, бейджем ДЗ."""
+    """SCH-04/SCH-11: карточка занятия с временем, предметом, статусом, бейджем ДЗ.
+
+    ``subject_caption`` — подпись предмета для показа. Страница передаёт сюда
+    сокращённое название (UI-14), если оно включено в настройках, и полное —
+    иначе. Полное название остаётся в подсказке и в ``lesson.subject_name``,
+    поэтому поиск и диалоги правки работают с настоящим названием.
+    """
 
     cancel_requested = Signal(int, int)   # profile_id, slot_no
     replace_requested = Signal(int, int)
     reset_requested = Signal(int)         # override_id
     homework_requested = Signal()
 
-    def __init__(self, lesson, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        lesson,
+        parent: QWidget | None = None,
+        *,
+        subject_caption: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.lesson = lesson
-        self.setObjectName("Card")
-        if lesson.status == LessonStatus.CANCELLED:
-            self.setStyleSheet(
-                f"QFrame#Card {{ background-color: {COLORS['cancelled_bg']}; "
-                f"border: 1px solid {COLORS['cancelled']}; border-radius: 6px; }}"
-            )
+        # Отменённая пара — карточка приглушённых цветов (CardCancelled),
+        # остальные — обычная карточка. Цвета задаёт тема, а не эта строка.
+        self.setObjectName(
+            "CardCancelled" if lesson.status == LessonStatus.CANCELLED else "Card"
+        )
+        # UI-13: номер оттенка предмета. Сам оттенок выбирает тема, поэтому
+        # смена темы перекрашивает пары без пересоздания карточек.
+        subject_id = lesson.subject.id if lesson.subject else None
+        self.setProperty(
+            "subjectColor",
+            subject_color_index(subject_id, lesson.subject_name or ""),
+        )
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 9, 12, 9)
@@ -102,13 +131,16 @@ class LessonCard(QFrame):
         # Предмет, преподаватель, кабинет.
         text_box = QVBoxLayout()
         text_box.setSpacing(1)
-        self.subject_label = QLabel(lesson.subject_name or "—")
-        self.subject_label.setObjectName("Subtitle")
+        caption = subject_caption or lesson.subject_name or "—"
+        self.subject_label = QLabel(caption)
+        self.subject_label.setObjectName(
+            "StrikeText" if lesson.status == LessonStatus.CANCELLED else "SubjectName"
+        )
         self.subject_label.setWordWrap(True)
-        if lesson.status == LessonStatus.CANCELLED:
-            self.subject_label.setStyleSheet(
-                f"color: {COLORS['status_cancelled']}; text-decoration: line-through;"
-            )
+        # UI-14: сокращённая подпись не должна скрывать полное название — оно
+        # видно во всплывающей подсказке.
+        if caption != (lesson.subject_name or "—"):
+            self.subject_label.setToolTip(lesson.subject_name or "")
         text_box.addWidget(self.subject_label)
 
         details = " · ".join(
@@ -121,9 +153,8 @@ class LessonCard(QFrame):
 
         if lesson.comment:
             comment = QLabel(lesson.comment)
-            comment.setObjectName("Small")
+            comment.setObjectName("WarningText")
             comment.setWordWrap(True)
-            comment.setStyleSheet(f"color: {COLORS['warning_text']};")
             text_box.addWidget(comment)
 
         layout.addLayout(text_box, 1)
@@ -258,6 +289,8 @@ class SchedulePage(QWidget):
         self._date: date = clock.today()
         self._mode = "selected"
         self._warnings: list[str] = []
+        #: UI-14: сервис сокращённых названий; создаётся при первой отрисовке.
+        self._names: SubjectNameService | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 16)
@@ -271,8 +304,23 @@ class SchedulePage(QWidget):
         self.grid_button.clicked.connect(self.open_grid_editor)
         self.header.add_action(self.grid_button)
 
+        # UI-14: расписание картинкой — «скинуть в чат группы».
+        self.export_button = QPushButton("Сохранить картинкой…")
+        self.export_button.setObjectName("Flat")
+        self.export_button.setToolTip(
+            "Сохранить видимое расписание в PNG: удобно отправить в чат."
+        )
+        self.export_button.clicked.connect(self.export_image)
+        self.header.add_action(self.export_button)
+
         # ------------------------------------------------- переключатель режимов
-        controls = QHBoxLayout()
+        # Раскладка с переносом, а не в одну строку: панель управления
+        # содержит поле режима, стрелки, дату (минимум 240 px), «Сегодня» и
+        # флажок. В одну строку это 1022 px — больше, чем
+        # центральная зона при минимальном окне 1080x680 (около 452 px), и
+        # QHBoxLayout сжимал элементы ниже минимума: флажок получал 73 px при
+        # 172, бейдж «Нижняя неделя» — 73 при 103, и текст обрезался.
+        controls = FlowLayout()
         controls.setSpacing(8)
 
         self.mode_combo = QComboBox()
@@ -310,8 +358,8 @@ class SchedulePage(QWidget):
         self.show_cancelled.toggled.connect(self._on_show_cancelled)
         controls.addWidget(self.show_cancelled)
 
-        controls.addStretch(1)
-        self.week_badge_holder = QHBoxLayout()
+        self.week_badge_holder = FlowLayout()
+        self.week_badge_holder.setSpacing(8)
         controls.addLayout(self.week_badge_holder)
         outer.addLayout(controls)
 
@@ -393,10 +441,23 @@ class SchedulePage(QWidget):
         self.refresh()
 
     # ------------------------------------------------------------------ отрисовка
+    def _subject_caption(self, name: str) -> str:
+        """UI-14: подпись предмета по настройкам сокращённых названий.
+
+        Сокращения читаются один раз на перерисовку: страница создаёт сервис
+        заново в ``refresh``, поэтому включение или правка сокращений в
+        настройках видны сразу, без перезапуска.
+        """
+        if self._names is None:
+            self._names = SubjectNameService(self.db)
+        return self._names.smart(name, limit=SUBJECT_CAPTION_LIMIT)
+
     def refresh(self) -> None:
         resolver = DayResolver(self.db)
         overrides = OverrideService(self.db)
         calendar = CalendarService(self.db)
+        # Настройки сокращений перечитываются на каждую перерисовку.
+        self._names = SubjectNameService(self.db)
 
         while self.days_layout.count():
             item = self.days_layout.takeAt(0)
@@ -461,12 +522,17 @@ class SchedulePage(QWidget):
             f"{WEEKDAY_NAMES[day.isoweekday()]} {day.strftime('%d.%m')}"
         )
         if day == clock.today():
-            column.header.setStyleSheet(f"color: {COLORS['accent_hover']};")
+            column.header.setObjectName("TodayHeader")
             column.subheader.setText("сегодня")
         else:
             column.subheader.setText("")
 
         result = resolver.resolve(day)
+
+        # EXAM-06: испытание показывается в дне первым — важнее пар, и о нём
+        # легко забыть, если он виден только на отдельной странице.
+        for day_exam in ExamService(self.db).day_exams(day):
+            column.body.addWidget(self._exam_card(day_exam))
 
         # CAL-09: в период без занятий показываем название и причину.
         period = calendar.period_at(day)
@@ -509,7 +575,9 @@ class SchedulePage(QWidget):
             return column, False
 
         for lesson in visible:
-            card = LessonCard(lesson)
+            card = LessonCard(
+                lesson, subject_caption=self._subject_caption(lesson.subject_name)
+            )
             card.cancel_requested.connect(
                 lambda profile_id, slot_no, value=day: self.cancel_lesson(
                     value, profile_id, slot_no
@@ -647,6 +715,119 @@ class SchedulePage(QWidget):
             self.changed.emit()
             self.refresh()
 
+    # ------------------------------------------------------------------ экспорт
+    def export_image(self) -> str | None:
+        """UI-14: сохранить видимое расписание в PNG.
+
+        Снимок делается с области дней (``days_host``), а не со всей страницы:
+        в картинку не попадают кнопки правки и переключатели — получается
+        расписание, которое не стыдно отправить в чат группы.
+
+        Возвращает путь сохранённого файла или ``None``, если пользователь
+        отменил выбор. Метод отдельный от обработчика кнопки, чтобы его можно
+        было проверить тестом без диалога.
+        """
+        from PySide6.QtWidgets import QFileDialog
+
+        days = self._visible_days()
+        default_name = "raspisanie_"
+        if len(days) == 1:
+            default_name += days[0].strftime("%Y-%m-%d")
+        else:
+            default_name += f"{days[0]:%Y-%m-%d}_{days[-1]:%Y-%m-%d}"
+
+        target, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить расписание", f"{default_name}.png", "Изображение (*.png)"
+        )
+        if not target:
+            return None
+        if not target.lower().endswith(".png"):
+            target += ".png"
+        if self.save_image_to(target):
+            self._message(f"Расписание сохранено: {target}")
+            return target
+        self._message(f"Не удалось сохранить файл: {target}")
+        return None
+
+    def save_image_to(self, path: str) -> bool:
+        """Записать картинку расписания по указанному пути (UI-14).
+
+        Молча: сообщение показывает вызывающий. Иначе проверка сохранения в
+        тесте упиралась бы в модальное окно.
+        """
+        try:
+            pixmap = self.render_image()
+            return bool(pixmap.save(path, "PNG"))
+        except OSError:
+            return False
+
+    def render_image(self):
+        """Собрать картинку расписания: заголовок с датой и колонки дней.
+
+        Заголовок рисуется здесь, а не берётся со страницы: на снимке нужно
+        видеть, за какой период расписание, иначе картинка в чате теряет смысл.
+        """
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont, QPainter, QPixmap
+
+        source = self.days_host
+        # Скрытые элементы (пустое состояние, баннеры) не должны попадать
+        # белыми полосами: grab() рисует только видимое.
+        body = source.grab()
+        # Полоса заголовка с запасом: 13pt DemiBold занимает ~24 px, плюс
+        # отступ сверху и снизу — при 46 px нижняя часть букв обрезалась.
+        header_height = 64
+        margin = 12
+        width = max(body.width(), 480)
+        height = body.height() + header_height + margin * 2
+
+        canvas = QPixmap(width, height)
+        canvas.fill(self._export_background())
+
+        painter = QPainter(canvas)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            font = QFont(FONT_FAMILY, 13)
+            font.setWeight(QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.setPen(self._export_text_color())
+            days = self._visible_days()
+            if len(days) == 1:
+                caption = f"Расписание · {format_display(days[0])}"
+            else:
+                caption = (
+                    f"Расписание · {format_display(days[0])} — "
+                    f"{format_display(days[-1])}"
+                )
+            painter.drawText(
+                margin,
+                margin,
+                width - margin * 2,
+                header_height - 8,
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                caption,
+            )
+            painter.drawPixmap(margin, margin + header_height, body)
+        finally:
+            painter.end()
+        return canvas
+
+    @staticmethod
+    def _export_background() -> "QColor":
+        from PySide6.QtGui import QColor
+
+        from ..theme import COLORS
+
+        return QColor(COLORS["background"])
+
+    @staticmethod
+    def _export_text_color() -> "QColor":
+        from PySide6.QtGui import QColor
+
+        from ..theme import COLORS
+
+        return QColor(COLORS["text"])
+
     # ------------------------------------------------------------------ помощь
     def _find_lesson(self, day: date, profile_id: int, slot_no: int):
         result = DayResolver(self.db).resolve(day)
@@ -675,6 +856,39 @@ class SchedulePage(QWidget):
             if slot.slot_no not in occupied:
                 return slot.slot_no
         return None
+
+    def _exam_card(self, day_exam) -> QWidget:
+        """EXAM-06: карточка испытания в колонке дня."""
+        from PySide6.QtWidgets import QLabel
+
+        from ...core.exam_service import ExamRow as _ExamRow  # noqa: F401 - тип для читаемости
+        from ..widgets import Badge, Card
+
+        card = Card(self._subject_caption(day_exam.subject_name))
+        card.setObjectName("CardWarning")
+        caption = QLabel(
+            " · ".join(
+                part
+                for part in (
+                    day_exam.exam.kind_label,
+                    day_exam.exam.time,
+                    f"каб. {day_exam.exam.room}" if day_exam.exam.room else None,
+                )
+                if part
+            )
+        )
+        caption.setObjectName("WarningText")
+        caption.setWordWrap(True)
+        card.add_widget(caption)
+
+        badges = QWidget()
+        badges_layout = QHBoxLayout(badges)
+        badges_layout.setContentsMargins(0, 0, 0, 0)
+        badges_layout.setSpacing(6)
+        badges_layout.addWidget(Badge(day_exam.countdown, "warning"))
+        badges_layout.addStretch(1)
+        card.add_widget(badges)
+        return card
 
     def _delete_orphans(self) -> None:
         removed = OverrideService(self.db).delete_orphans()

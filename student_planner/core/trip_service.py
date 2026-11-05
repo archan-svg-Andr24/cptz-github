@@ -62,10 +62,22 @@ class DayPlan:
     confirmation: TripConfirmation | None = None
     #: Замечания, которые UI показывает как предупреждения (например, нет тарифа).
     warnings: list[str] = field(default_factory=list)
+    #: TRIP-07: предварительная стоимость выбранного набора (до подтверждения).
+    #: ``None`` — посчитать не удалось (нет тарифа); ``zero``-сумма — поездок нет.
+    estimated_total: Decimal | None = None
+    #: Остаток кошелька после подтверждения (``None`` — остаток не задан).
+    estimated_balance: Decimal | None = None
+    #: Номера поездок, которые получит каждая нога набора (для подписи).
+    estimated_numbers: tuple[int, ...] = ()
 
     @property
     def is_confirmed(self) -> bool:
         return self.confirmation is not None
+
+    @property
+    def has_estimate(self) -> bool:
+        """Есть ли предварительный расчёт для показа."""
+        return self.estimated_total is not None and self.legs_count > 0
 
     @property
     def legs_count(self) -> int:
@@ -119,6 +131,7 @@ class TripPlanService:
         self.templates = TripTemplateRepository(db)
         self.confirmations = TripConfirmationRepository(db)
         self.rides = RideRepository(db)
+        self.tariffs = TariffRepository(db)
 
     # ------------------------------------------------------------- подготовка
     def plan(
@@ -172,7 +185,78 @@ class TripPlanService:
                 "В этот день занятий нет: автоподстановка не выполняется, "
                 "подтвердить поездки можно вручную."
             )
+        self._add_estimate(plan)
         return plan
+
+    def _add_estimate(self, plan: DayPlan) -> None:
+        """TRIP-07: посчитать стоимость набора **до** подтверждения.
+
+        Раньше блок «Расчёт» на вкладке «Подтверждение дня» показывал «—»
+        вместо стоимости и остатка: значения брались из уже сохранённых
+        поездок, а до подтверждения их нет. Пользователь видел пустые поля и
+        не понимал, что получится. Теперь цена считается по выбранным
+        шаблонам теми же правилами (ALG-09), что и при подтверждении.
+
+        Если тарифа на дату нет, ``estimated_total`` остаётся ``None``, и
+        интерфейс показывает «—» вместе с предупреждением.
+        """
+        if plan.confirmation is not None:
+            # У подтверждённого дня точные суммы берутся из сохранённых рейсов.
+            return
+        templates: list[tuple[TripTemplate, str]] = []
+        if plan.include_outbound and plan.outbound is not None:
+            templates.append((plan.outbound, Direction.HOME_TO_COLLEGE))
+        if plan.include_return and plan.return_trip is not None:
+            templates.append((plan.return_trip, Direction.COLLEGE_TO_HOME))
+        if not templates:
+            plan.estimated_total = ZERO
+            return
+
+        resolver = TariffResolver(self.tariffs.all(include_inactive=False))
+        calculator = self._calculator(plan.day)
+        base_state = calculator.resolve(plan.day, ride_id=None)
+        # ALG-02 шаг 3: до начала учёта номера ещё нет (``None``); нумеровать
+        # набор в этом случае нечем, поэтому считаем стоимость без номеров.
+        next_number = base_state.ride_number
+        total = ZERO
+        numbers: list[int] = []
+        for template, direction in templates:
+            for leg in template.legs:
+                is_strelka = leg.payment_method == PaymentMethod.STRELKA
+                stage = (
+                    stage_kind_for(next_number, calculator.first_limit)
+                    if next_number is not None else "strelka_stage1"
+                )
+                try:
+                    pricing = price_ride(
+                        resolver,
+                        ride_date=plan.day,
+                        transport_type=leg.mode,
+                        payment_method=leg.payment_method,
+                        stage=stage if is_strelka else None,
+                    )
+                except Exception:
+                    plan.estimated_total = None
+                    plan.estimated_balance = None
+                    plan.estimated_numbers = ()
+                    plan.warnings.append(
+                        f"Нет тарифа «{TransportType.label(leg.mode)}» на "
+                        f"{dt.format_display(plan.day)}: стоимость не рассчитана."
+                    )
+                    return
+                total += pricing.paid_price
+                if is_strelka and next_number is not None:
+                    numbers.append(next_number)
+                    next_number += 1
+        plan.estimated_total = total
+        plan.estimated_numbers = tuple(numbers)
+        try:
+            from .transport_service import TransportService
+
+            balance = TransportService(self.db).strella_state(today=plan.day).balance
+        except Exception:  # pragma: no cover - защита расчёта
+            balance = None
+        plan.estimated_balance = (balance - total) if balance is not None else None
 
     def _pick_template(
         self, direction: str, weekday: int, explicit_id: int | None
@@ -290,7 +374,14 @@ class TripPlanService:
                             "по базовому тарифу."
                         )
 
-        self.recalculate(from_date=day)
+            # CALC-04: пересчёт номеров и цен обязан быть **в той же**
+            # транзакции, что и создание поездок. Раньше вызов стоял после
+            # закрытия ``with``: если пересчёт падал (например, не хватало
+            # тарифа), подтверждение и поездки уже были зафиксированы —
+            # пользователь видел ошибку, а в базе оставался день с поездками
+            # и одинаковыми номерами («№1» у двух рейсов). Чинилось только
+            # ручным пересчётом.
+            self.recalculate(from_date=day)
         return result
 
     def _build_ride(

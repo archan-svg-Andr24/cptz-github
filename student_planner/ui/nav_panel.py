@@ -1,8 +1,7 @@
 """Левая панель навигации (UI-04, UI-05).
 
 Состав: профиль (имя и группа, при пустом значении — «Не указано», FIRST-15),
-меню из пяти разделов, мини-календарь и бейдж типа недели. Раздел «Экзамены»
-добавится в v1.1.
+меню из разделов, мини-календарь и бейдж типа недели.
 """
 
 from __future__ import annotations
@@ -27,12 +26,13 @@ from ..core.settings_service import SettingsService
 from .calendar_widget import MiniCalendar
 from .widgets import Badge, Separator, repolish
 
-#: UI-04/UI-06: разделы меню. «Экзамены» — v1.1.
+#: UI-04/UI-06: разделы меню. «Экзамены» — EXAM-01.
 NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("schedule", "Расписание"),
     ("trips", "Поездки"),
     ("expenses", "Расходы на транспорт"),
     ("homework", "Домашние задания"),
+    ("exams", "Экзамены"),
     ("settings", "Настройки"),
 )
 
@@ -91,6 +91,9 @@ class NavPanel(QFrame):
             button = QPushButton(caption)
             button.setObjectName("NavItem")
             button.setCheckable(True)
+            # UI-13: радужная тема красит выбранный пункт в цвет своего
+            # раздела. Селектор в стилевой таблице цепляется за это свойство.
+            button.setProperty("page", key)
             # При узкой панели длинное название («Расходы на транспорт»)
             # переносится на вторую строку, а не обрезается. Исходный текст
             # храним в свойстве: перенос пересчитывается при каждом ресайзе.

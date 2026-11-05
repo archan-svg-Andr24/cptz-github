@@ -251,12 +251,24 @@ def _verify_schema_version(conn: sqlite3.Connection, path: Path) -> None:
 
 
 def is_initialized(path: Path) -> bool:
-    """Есть ли в файле схема приложения версии 1."""
+    """Есть ли в файле схема приложения.
+
+    Повреждённый файл не должен ронять запуск: ``sqlite3`` бросает
+    ``DatabaseError('file is not a database')``, а вызов идёт до обработки
+    ошибок приложения, и пользователь получал трейсбек вместо диалога
+    DATA-19. Считаем такой файл «не нашей базой» — дальше его обработает
+    ``open_database`` с понятным сообщением.
+    """
     if not Path(path).exists():
         return False
-    conn = sqlite3.connect(str(path))
+    try:
+        conn = sqlite3.connect(str(path))
+    except sqlite3.Error:
+        return False
     try:
         return has_table(conn, "settings") and has_table(conn, "transport_rides")
+    except sqlite3.DatabaseError:
+        return False
     finally:
         conn.close()
 

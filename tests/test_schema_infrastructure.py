@@ -49,7 +49,6 @@ def test_acc_m_97_schema_has_18_tables_and_no_timetables(db: Database) -> None:
     tariff_columns = {row["name"] for row in db.fetchall("PRAGMA table_info(tariffs)")}
     assert "vehicle" in tariff_columns
     template_columns = {row["name"] for row in db.fetchall("PRAGMA table_info(schedule_templates)")}
-    assert "group_mark" in template_columns
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +243,13 @@ def test_acc_m_100_transaction_rolls_back_entirely(db: Database, subjects, bells
     with pytest.raises(RuntimeError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
-                "effective_from) VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, "
+                "effective_from) VALUES (?, 'lower', 1, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
-                "effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, "
+                "effective_from) VALUES (?, 'lower', 2, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
             raise RuntimeError("принудительная ошибка в середине записи")
@@ -265,14 +264,14 @@ def test_nested_transaction_is_atomic(db: Database, subjects, bells) -> None:
     profile = bells.create_profile(1, "Понедельник")
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, effective_from) "
-            "VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
+            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, effective_from) "
+            "VALUES (?, 'lower', 1, ?, '0001-01-01')",
             (profile.id, subject.id),
         )
         with db.transaction() as inner:
             inner.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
-                "effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, "
+                "effective_from) VALUES (?, 'lower', 2, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
         # Внутренняя транзакция не коммитит сама по себе.
@@ -286,14 +285,14 @@ def test_nested_transaction_rollback_on_error(db: Database, subjects, bells) -> 
     with pytest.raises(ValueError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, "
-                "effective_from) VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, "
+                "effective_from) VALUES (?, 'lower', 1, ?, '0001-01-01')",
                 (profile.id, subject.id),
             )
             with db.transaction() as inner:
                 inner.execute(
-                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id, effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
+                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                    "subject_id, effective_from) VALUES (?, 'lower', 2, ?, '0001-01-01')",
                     (profile.id, subject.id),
                 )
                 raise ValueError("ошибка внутри вложенной транзакции")
@@ -310,15 +309,15 @@ def test_inner_rollback_keeps_outer_committed(db: Database, subjects, bells) -> 
     profile = bells.create_profile(1, "Понедельник")
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, effective_from) "
-            "VALUES (?, 'lower', 1, NULL, ?, '0001-01-01')",
+            "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, effective_from) "
+            "VALUES (?, 'lower', 1, ?, '0001-01-01')",
             (profile.id, subject.id),
         )
         try:
             with db.transaction() as inner:
                 inner.execute(
-                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, "
-                    "subject_id, effective_from) VALUES (?, 'lower', 2, NULL, ?, '0001-01-01')",
+                    "INSERT INTO schedule_templates(profile_id, week_type, slot_no, "
+                    "subject_id, effective_from) VALUES (?, 'lower', 2, ?, '0001-01-01')",
                     (profile.id, subject.id),
                 )
                 raise ValueError("внутренняя операция не удалась")
@@ -396,8 +395,8 @@ def test_foreign_keys_prevent_dangling_references(db: Database) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, group_mark, subject_id, effective_from) "
-                "VALUES (999, 'lower', 1, NULL, NULL, '0001-01-01')"
+                "INSERT INTO schedule_templates(profile_id, week_type, slot_no, subject_id, effective_from) "
+                "VALUES (999, 'lower', 1, NULL, '0001-01-01')"
             )
 
 
@@ -407,7 +406,7 @@ def test_checks_reject_invalid_enum_values(db: Database, subjects) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         with db.transaction() as conn:
             conn.execute(
-                "INSERT INTO homework(subject_id, group_mark, due_date, description, status, created_at) "
-                "VALUES (?, NULL, '2026-09-10', 'x', 'overdue', '2026-09-01 00:00:00')",
+                "INSERT INTO homework(subject_id, due_date, description, status, created_at) "
+                "VALUES (?, '2026-09-10', 'x', 'overdue', '2026-09-01 00:00:00')",
                 (subject.id,),
             )

@@ -43,3 +43,12 @@ desktop.ini
 *.docx
 !Пояснительная записка КП.docx
 !Техническое задание КП.docx
+
+# Черновые скрипты сборки документов, картинки для пояснительной записки
+# и аналитика токенов: к исходному коду приложения не относятся.
+.tok-analysis/
+tools/
+figures/
+plugins/
+token-budget-report.md
+token-usage-by-session.csv

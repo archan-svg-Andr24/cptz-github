@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from . import clock
@@ -561,16 +561,72 @@ class TransportService:
 
         # REP-09: блок кошелька — отдельно, в «потрачено» не входит (WAL-04).
         # «Пополнено» показывается суммой до комиссий: комиссии — своя колонка.
+        #
+        # WAL-02: учитываются пополнения **за период**, то есть в обеих
+        # границах. Раньше проверялась только верхняя, и отчёт за один день
+        # 10.09.2026 показывал 1200 ₽ вместо 200 ₽ — все прошлые пополнения
+        # попадали в сумму.
         until = criteria.date_to
+        since = criteria.date_from
         period_topups = [
             item
             for item in self.topups.all()
-            if until is None or item.topup_date <= until
+            if (until is None or item.topup_date <= until)
+            and (since is None or item.topup_date >= since)
         ]
         totals.topups = money(sum((item.amount for item in period_topups), ZERO))
         totals.fees = money(sum((item.fee for item in period_topups), ZERO))
         totals.balance_end = wallet_balance(self.db, until=until)
         return totals
+
+    # --------------------------------------------------------------- аналитика
+    def compare(self, criteria: JournalFilter | None = None) -> dict[str, Decimal | int]:
+        """REP-04: сравнение с предыдущим периодом той же длины.
+
+        Показывает динамику расходов: сколько потрачено сейчас, сколько было
+        в предыдущем окне и на сколько процентов изменилось. Без этого отчёт
+        «за месяц» — просто набор сумм, по которому нельзя понять, тратишь ты
+        больше или меньше.
+        """
+        criteria = criteria or JournalFilter()
+        current = self.report(criteria)
+        previous = self.report(self._previous_period(criteria))
+        spent_now = current.spent
+        spent_before = previous.spent
+        if spent_before > 0:
+            percent = (spent_now - spent_before) / spent_before * 100
+        else:
+            percent = None
+        return {
+            "spent_now": spent_now,
+            "spent_before": spent_before,
+            "change_percent": money(percent) if percent is not None else None,
+            "rides_now": current.rides_total,
+            "rides_before": previous.rides_total,
+            "average_ride": (
+                money(spent_now / current.rides_total) if current.rides_total else ZERO
+            ),
+            "average_ride_before": (
+                money(spent_before / previous.rides_total)
+                if previous.rides_total else ZERO
+            ),
+        }
+
+    @staticmethod
+    def _previous_period(criteria: JournalFilter) -> JournalFilter:
+        """Предыдущее окно той же длины (``all`` не имеет предыдущего)."""
+        if criteria.date_from is None or criteria.date_to is None:
+            return JournalFilter()
+        length = (criteria.date_to - criteria.date_from).days + 1
+        prev_to = criteria.date_from - timedelta(days=1)
+        prev_from = prev_to - timedelta(days=length - 1)
+        return JournalFilter(
+            date_from=prev_from,
+            date_to=prev_to,
+            transport_type=criteria.transport_type,
+            payment_method=criteria.payment_method,
+            direction=criteria.direction,
+        )
 
     # --------------------------------------------------------------- «Стрелка»
     def strella_state(self, *, today: date | None = None) -> StrellaState:
@@ -590,7 +646,13 @@ class TransportService:
             approximate=bool(counted),
         )
         if not counted:
-            state = self._with_next_ride(state, base, 1, settings, resolver)
+            # ALG-02 шаг 1: номер считается как ``cnt0 + 1``. Раньше здесь
+            # стояла жёсткая единица, поэтому сразу после мастера первого
+            # запуска (там задаётся ``strelka_initial_ride_count``) программа
+            # показывала «№1 — 36.50 ₽» вместо, например, «№35 — 0.73 ₽»:
+            # пользователь видел неверный номер и неверную ступень скидки.
+            next_number = settings["initial_count"] + 1
+            state = self._with_next_ride(state, base, next_number, settings, resolver)
             return self._with_warning(state, settings, resolver, base)
 
         calculator = StrellaPeriodCalculator(
@@ -601,7 +663,28 @@ class TransportService:
             first_limit=settings["first_limit"],
         )
         resolved = calculator.resolve(base)
-        period_start = resolved.period_start or base
+        # ALG-02 шаг 3: до даты начала учёта периода ещё нет. Нельзя подставлять
+        # ``base`` вместо отсутствующей границы: получались выдуманные
+        # «01.09 — 30.09» и «№None» в интерфейсе. При таком состоянии границы
+        # остаются пустыми, а номер поездки не показывается.
+        if resolved.period_start is None:
+            state = StrellaState(
+                started=True,
+                period_start=None,
+                period_end=None,
+                rides_in_period=0,
+                savings_in_period=ZERO,
+                spent_in_period=ZERO,
+                balance=wallet_balance(self.db),
+                has_topup=has_any_topup(self.db),
+                initial_count=settings["initial_count"],
+                approximate=False,
+                next_ride_number=None,
+                next_ride_price=None,
+                next_ride_stage=None,
+            )
+            return state
+        period_start = resolved.period_start
         period_end = add_days(period_start, settings["period_days"] - 1)
         in_period = [
             ride

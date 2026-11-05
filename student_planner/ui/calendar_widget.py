@@ -87,8 +87,13 @@ class MiniCalendar(QWidget):
         self._paint_marks()
 
     def set_week_types(self, types: dict[date, str]) -> None:
-        """UI-05: тип недели в подсветке."""
-        self._week_types.update(types)
+        """UI-05: тип недели в подсветке.
+
+        Словарь **заменяется**, а не дополняется: при листании месяцев старые
+        даты копились (35 → 196 записей за несколько прокруток), и устаревшее
+        значение перебивало свежий расчёт, если якорь недель менялся.
+        """
+        self._week_types = dict(types)
         self._paint_marks()
 
     def set_type_resolver(self, resolver) -> None:
@@ -151,8 +156,14 @@ class MiniCalendar(QWidget):
         self.calendar.setStyleSheet(self._style())
 
     def go_today(self) -> None:
+        """UI-05: перейти к сегодняшней дате.
+
+        Отдельный ``emit`` не нужен: ``set_selected`` меняет выбранную дату, и
+        ``QCalendarWidget`` сам присылает ``selectionChanged``, обработчик
+        которого эмитит ``date_selected``. Второй сигнал заставлял окно
+        дважды перерисовывать расписание, правую панель и метки.
+        """
         self.set_selected(clock.today())
-        self.date_selected.emit(self.selected_date)
 
     # ------------------------------------------------------------------ отрисовка
     def _paint_marks(self) -> None:
@@ -195,6 +206,12 @@ class MiniCalendar(QWidget):
                 fmt.setForeground(QColor(COLORS["warning_text"]))
             if "override" in kinds:
                 fmt.setFontUnderline(True)
+            # EXAM-06: экзамен выделяется жирным начертанием и цветом —
+            # наклонного шрифта и подчёркивания уже заняты изменением
+            # расписания, а совмещать два признака в одном дне нельзя.
+            if "exam" in kinds:
+                fmt.setFontWeight(700)
+                fmt.setForeground(QColor(COLORS["accent"]))
             fmt.setToolTip(self._tooltip(value))
             self.calendar.setDateTextFormat(QDate(value.year, value.month, value.day), fmt)
 
@@ -250,6 +267,7 @@ class MiniCalendar(QWidget):
             "rides": "поездки подтверждены",
             "period": "учебный период",
             "homework": "дедлайн задания",
+            "exam": "экзамен или зачёт",
         }
         for key, caption in captions.items():
             if key in marks:
@@ -263,7 +281,7 @@ class MiniCalendar(QWidget):
         self.month_label.setText(
             f"{MONTH_NAMES_NOMINATIVE[self.calendar.monthShown()]} {self.calendar.yearShown()}"
         )
-        self.legend.setText("• изменение   • поездки   • период   • задание")
+        self.legend.setText("• изменение   • поездки   • период   • задание   • экзамен")
 
     # ------------------------------------------------------------------ события
     def _on_selection(self) -> None:
@@ -277,6 +295,17 @@ class MiniCalendar(QWidget):
         # Метки точек приходят из окна: при листании месяца их нужно
         # пересчитать, иначе точки остаются от прежнего месяца.
         self.month_changed.emit()
+
+    def apply_theme(self) -> None:
+        """Перекрасить календарь после смены темы.
+
+        ``QCalendarWidget`` рисует дни через ``QTextCharFormat`` и собственную
+        таблицу стилей, поэтому общая смена темы приложения его не трогает:
+        без явного вызова цифры оставались бы цвета прежней палитры.
+        """
+        self.calendar.setStyleSheet(self._style())
+        self._paint_marks()
+        self._apply_weekday_formats()
 
     # ------------------------------------------------------------------ стиль
     def _style(self) -> str:
@@ -340,13 +369,20 @@ class MiniCalendar(QWidget):
 
 
 def _month_dates(year: int, month: int) -> list[date]:
-    """Все даты месяца, включая ведущие и хвостовые дни сетки."""
+    """Все даты месяца, включая ведущие и хвостовые дни сетки.
+
+    Диапазон ограничивается допустимыми датами Python: для января 1-го года
+    ведущие дни уходят в прошлое до ``date.min``, а для декабря 9999-го
+    хвостовые — за ``date.max``. Без ограничения ``date.fromordinal`` бросает
+    ``ValueError: year 10000 is out of range`` и календарь перестаёт
+    перерисовываться (это ломало окно при выборе такой даты).
+    """
     from calendar import monthrange
 
     first = date(year, month, 1)
     last = date(year, month, monthrange(year, month)[1])
-    start = first.toordinal() - (first.weekday())
-    end = last.toordinal() + (6 - last.weekday())
+    start = max(first.toordinal() - first.weekday(), date.min.toordinal())
+    end = min(last.toordinal() + (6 - last.weekday()), date.max.toordinal())
     return [date.fromordinal(value) for value in range(start, end + 1)]
 
 

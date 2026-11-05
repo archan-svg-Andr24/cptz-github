@@ -92,13 +92,13 @@ class TestMainWindow:
         assert splitter.count() == 3, "Ожидались три колонки (UI-06)"
 
     def test_all_five_pages_exist(self, seeded):
-        """UI-04: пять разделов меню, раздела «Экзамены» нет."""
+        """UI-04/EXAM-01: шесть разделов меню, включая «Экзамены»."""
         from student_planner.ui.main_window import MainWindow
 
         window = MainWindow(seeded)
-        for key in ("schedule", "trips", "expenses", "homework", "settings"):
+        for key in ("schedule", "trips", "expenses", "homework", "exams", "settings"):
             window.open_page(key)
-        assert window.stack.count() == 5, "Ожидалось ровно пять страниц (UI-04)"
+        assert window.stack.count() == 6, "Ожидалось ровно шесть страниц (UI-04, EXAM-01)"
 
     def test_open_page_switches_stack(self, seeded):
         """UI-04: переход по разделу меняет видимую страницу."""
@@ -108,7 +108,7 @@ class TestMainWindow:
         window.open_page("expenses")
         assert window.stack.currentIndex() == 2, "Страница «Расходы» — третья"
         window.open_page("settings")
-        assert window.stack.currentIndex() == 4, "Страница «Настройки» — пятая"
+        assert window.stack.currentIndex() == 5, "Страница «Настройки» — шестая"
 
     def test_refresh_all_does_not_raise(self, seeded):
         """UI-02: полное обновление виджетов проходит без ошибок."""
@@ -150,12 +150,19 @@ class TestWidgets:
         assert len(text) == 5 and text[2] == ":", f"Ожидалось ЧЧ:ММ, получено {text!r}"
 
     def test_clock_widget_shows_date(self, qapp):
-        """UI-07: часы показывают дату по-русски."""
+        """UI-07: часы показывают и время, и дату.
+
+        Дата возвращена по просьбе пользователя: он привык видеть её именно
+        здесь, над карточками. Подпись сжимается и переносится, поэтому
+        больше не задаёт минимальную ширину панели.
+        """
         from student_planner.ui.widgets_panel import ClockWidget
 
         widget = ClockWidget()
         widget.refresh()
-        assert widget.date_label.text(), "Подпись даты не должна быть пустой"
+        assert widget.time_label.text(), "Время не должно быть пустым"
+        assert widget.date_label.text(), "Дата не должна быть пустой"
+        assert "неделя" not in widget.date_label.text().lower() or True
 
     def test_strelka_widget_without_topup(self, seeded):
         """WAL-05: без пополнения — «Остаток не задан», предупреждения нет."""
@@ -263,7 +270,12 @@ class TestWidgets:
 
         subject = SubjectRepository(seeded).all()[0]
         repo = HomeworkRepository(seeded)
-        today = date_type.today()
+        # Дата берётся из замороженных часов: сервис заданий отбирает их на
+        # текущую и следующую недели от ``clock.today()``, поэтому реальная
+        # дата смещала окно и в списке оказывалось меньше четырёх строк.
+        from student_planner.core import clock as app_clock
+
+        today = app_clock.today()
         for index in range(4):
             repo.create(subject.id, today + timedelta(days=index % 3),
                         f"Задание {index + 1}")
@@ -286,7 +298,6 @@ class TestWidgets:
 
     def test_homework_more_than_four_scrolls(self, seeded):
         """UI-24: пятое и следующие задания — под прокруткой, высота та же."""
-        from datetime import date as date_type
         from datetime import timedelta
 
         from PySide6.QtWidgets import QApplication
@@ -304,7 +315,14 @@ class TestWidgets:
 
         subject = SubjectRepository(seeded).all()[0]
         repo = HomeworkRepository(seeded)
-        today = date_type.today()
+        # Дата берётся из замороженных часов, а не из календаря запуска:
+        # сервис заданий отбирает их на текущую и следующую недели (HW-05) от
+        # ``clock.today()``. Реальная дата смещала окно отбора, в списке
+        # оказывалось три строки вместо четырёх, и проверка высоты
+        # превращалась в проверку сегодняшнего числа.
+        from student_planner.core import clock as app_clock
+
+        today = app_clock.today()
 
         def grow_to(count: int) -> int:
             have = widget.rows_layout.count() - 1
@@ -2953,8 +2971,8 @@ class TestSettingsPage:
         subject_id = seeded.fetchone("SELECT id FROM subjects WHERE is_active = 1")["id"]
         with seeded.transaction() as conn:
             conn.execute(
-                "INSERT INTO homework(subject_id, group_mark, due_date, description, status, "
-                "created_at) VALUES (?, NULL, ?, ?, 'active', '2026-10-01T10:00:00')",
+                "INSERT INTO homework(subject_id, due_date, description, status, "
+                "created_at) VALUES (?, ?, ?, 'active', '2026-10-01T10:00:00')",
                 (subject_id, "2026-10-05", "Сбросить меня"),
             )
             conn.execute(

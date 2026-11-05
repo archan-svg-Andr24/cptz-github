@@ -35,8 +35,14 @@ from ...core.transport_service import (
     WalletService,
 )
 from ..dialogs import ManualRideDialog, TopUpDialog
-from ..theme import COLORS
-from ..widgets import Card, EmptyState, MetricRow, SectionHeader, Separator
+from ..widgets import (
+    Card,
+    EmptyState,
+    FlowLayout,
+    MetricRow,
+    SectionHeader,
+    Separator,
+)
 
 
 class ReportTab(QWidget):
@@ -116,6 +122,19 @@ class ReportTab(QWidget):
         self.structure_card.add_layout(self.structure_layout)
         layout.addWidget(self.structure_card)
 
+        # -------------------------------------------------------- аналитика
+        # REP-04: сравнение с предыдущим периодом и средние. Без этих цифр
+        # отчёт — просто набор сумм: по нему не понять, тратишь ты больше
+        # или меньше, чем в прошлом месяце.
+        self.analytics_card = Card("Аналитика")
+        self.avg_row = MetricRow("Средняя поездка")
+        self.prev_row = MetricRow("Было в прошлом периоде")
+        self.change_row = MetricRow("Изменение")
+        self.per_ride_row = MetricRow("Поездок было")
+        for row in (self.avg_row, self.prev_row, self.change_row, self.per_ride_row):
+            self.analytics_card.add_widget(row)
+        layout.addWidget(self.analytics_card)
+
         self.empty = EmptyState("Поездок за период нет")
         # Вес распределяется явно в refresh(). Скрытый EmptyState с весом 1
         # раздавал освободившееся место видимым карточкам, и зазор между ними
@@ -180,6 +199,29 @@ class ReportTab(QWidget):
             row.set_value(f"{amount} ₽ · {percent:.0f} %")
             self.structure_layout.addWidget(row)
         self.structure_card.setVisible(bool(structure))
+
+        # -------------------------------------------------------- аналитика
+        stats = service.compare(criteria)
+        if totals.has_rides:
+            self.avg_row.set_value(f"{stats['average_ride']} ₽")
+            self.prev_row.set_value(f"{stats['spent_before']} ₽")
+            self.per_ride_row.set_value(
+                f"{stats['rides_before']} (сейчас {stats['rides_now']})"
+            )
+            change = stats["change_percent"]
+            if change is None:
+                self.change_row.set_value("нет данных для сравнения")
+                self.change_row.set_kind("muted")
+            else:
+                arrow = "▲" if change > 0 else ("▼" if change < 0 else "=")
+                sign = "+" if change > 0 else ""
+                self.change_row.set_value(f"{arrow} {sign}{change} %")
+                # Рост расходов — не «ошибка», а факт: красный только для роста.
+                self.change_row.set_kind(
+                    "error" if change > 0 else ("success" if change < 0 else "")
+                )
+        self.analytics_card.setVisible(totals.has_rides)
+
         has_rides = totals.has_rides
         # Вес переключается вместе с видимостью: пустое состояние тянется,
         # когда оно одно, и не тянется, когда выше есть карточки. Иначе
@@ -205,7 +247,7 @@ class JournalTab(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        filters = QHBoxLayout()
+        filters = FlowLayout()
         filters.setSpacing(8)
 
         self.period_combo = QComboBox()
@@ -229,8 +271,6 @@ class JournalTab(QWidget):
             self.transport_combo.addItem(TransportType.label(value), value)
         self.transport_combo.currentIndexChanged.connect(self.refresh)
         filters.addWidget(self.transport_combo)
-
-        filters.addStretch(1)
 
         self.add_button = QPushButton("Добавить поездку…")
         self.add_button.setObjectName("Primary")
@@ -346,12 +386,11 @@ class TopUpsTab(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        top = QHBoxLayout()
+        top = FlowLayout()
         top.setSpacing(8)
         self.balance_label = QLabel()
         self.balance_label.setObjectName("Metric")
         top.addWidget(self.balance_label)
-        top.addStretch(1)
 
         self.add_button = QPushButton("Пополнить…")
         self.add_button.setObjectName("Primary")
@@ -444,6 +483,18 @@ class ExpensesPage(QWidget):
         header = SectionHeader("Расходы на транспорт")
         layout.addWidget(header)
 
+        # UI-09/REP-08: пересчёт счётчика «Стрелки» — операция над данными,
+        # поэтому она живёт здесь, рядом с журналом и пополнениями, а не в
+        # карточке правой панели, где от неё было больше шума, чем пользы.
+        self.recalculate_button = QPushButton("Пересчитать счётчик «Стрелки»…")
+        self.recalculate_button.setObjectName("Flat")
+        self.recalculate_button.setToolTip(
+            "Пересчитать номера поездок, цены и остаток по всем сохранённым данным "
+            "(REP-08). Обычно не требуется: подтверждение дня пересчитывает само."
+        )
+        self.recalculate_button.clicked.connect(self.recalculate_counter)
+        header.add_action(self.recalculate_button)
+
         self.tabs = QTabWidget()
         self.report_tab = ReportTab(db)
         self.journal_tab = JournalTab(db)
@@ -467,7 +518,15 @@ class ExpensesPage(QWidget):
 
     def _on_changed(self) -> None:
         self.report_tab.refresh()
-        self.changed.emit()
+
+    def recalculate_counter(self) -> None:
+        """REP-08: полный пересчёт счётчика «Стрелки» с подтверждением."""
+        from ..dialogs import RecalculateDialog
+
+        dialog = RecalculateDialog(self.db, self)
+        if dialog.exec():
+            self.changed.emit()
+            self.refresh()
 
 
 __all__ = ["ExpensesPage"]

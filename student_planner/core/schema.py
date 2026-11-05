@@ -1,10 +1,11 @@
 """Схема БД — Приложение Б ТЗ v1.11, версия схемы 1 (DATA-19, ACC-M-97).
 
 Схема **не сокращена** вместе с MVP: столбцы и таблицы будущих версий
-(`group_mark`, `part_seq`, `vehicle`, `calendar_day_marks`, `exams`,
-`practice_*`) присутствуют, но приложение MVP их не заполняет и по ним не
-фильтрует. Это осознанное решение ТЗ: возврат функций v1.1 не должен требовать
-миграции данных. Имена таблиц и полей сохранены как в Приложении Б.
+(`part_seq`, `vehicle`, `calendar_day_marks`, `exams`, `practice_*`)
+присутствуют, но приложение MVP их не заполняет и по ним не фильтрует. Это
+осознанное решение ТЗ: возврат функций v1.1 не должен требовать миграции
+данных. Имена таблиц и полей сохранены как в Приложении Б.
+
 
 Соглашения:
     время  — TEXT 'ЧЧ:ММ'
@@ -180,10 +181,9 @@ _DDL: Final[tuple[str, ...]] = (
       profile_id     INTEGER NOT NULL REFERENCES bell_profiles(id),
       week_type      TEXT NOT NULL CHECK (week_type IN ('upper','lower')),
       slot_no        INTEGER NOT NULL,
-      group_mark     INTEGER CHECK (group_mark IN (1, 2)),
       subject_id     INTEGER REFERENCES subjects(id),
       effective_from TEXT NOT NULL,
-      UNIQUE (profile_id, week_type, slot_no, group_mark, effective_from)
+      UNIQUE (profile_id, week_type, slot_no, effective_from)
     )
     """,
     # --- Б.8. Разовые изменения расписания ---------------------------------
@@ -193,7 +193,6 @@ _DDL: Final[tuple[str, ...]] = (
       date            TEXT NOT NULL,
       profile_id      INTEGER NOT NULL REFERENCES bell_profiles(id),
       slot_no         INTEGER NOT NULL,
-      group_mark      INTEGER CHECK (group_mark IN (1, 2)),
       part_seq        INTEGER,
       override_type   TEXT NOT NULL CHECK (override_type IN ('cancel','replace','add','move')),
       subject_id      INTEGER REFERENCES subjects(id),
@@ -293,7 +292,6 @@ _DDL: Final[tuple[str, ...]] = (
     CREATE TABLE homework (
       id           INTEGER PRIMARY KEY,
       subject_id   INTEGER NOT NULL REFERENCES subjects(id),
-      group_mark   INTEGER CHECK (group_mark IN (1, 2)),
       due_date     TEXT NOT NULL,
       description  TEXT,
       status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','done')),

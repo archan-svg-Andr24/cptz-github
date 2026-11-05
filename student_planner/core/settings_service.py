@@ -134,13 +134,28 @@ class SettingsService:
         return change
 
     def set_display_formats(self, date_format: str, time_format: str) -> None:
-        """Форматы отображения «Настройки → Общие» (SET-02)."""
+        """Форматы отображения «Настройки → Общие» (SET-02).
+
+        Сразу применяются к интерфейсу: ``format_display()`` берёт действующий
+        формат из модуля дат, поэтому выбранный вид виден без перезапуска, и
+        следующая же перерисовка страниц его покажет.
+        """
         self.set_many(
             {
                 SettingsKeys.DATE_DISPLAY_FORMAT: date_format,
                 SettingsKeys.TIME_DISPLAY_FORMAT: time_format,
             }
         )
+        self.apply_display_formats()
+
+    def apply_display_formats(self) -> None:
+        """Применить форматы из настроек к модулю отображения (SET-02).
+
+        Вызывается при запуске и после сохранения: иначе настройка оставалась
+        бы «мёртвой» — поле в настройках меняется, а даты на страницах нет.
+        """
+        dt.set_display_format(self.display_format())
+        dt.set_time_format(self.time_format())
 
     def set_student_profile(self, name: str, group: str) -> None:
         """Имя и группа (FIRST-15); отказ допустим — пустые строки."""

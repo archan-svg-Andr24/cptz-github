@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -27,8 +28,8 @@ from ...core import clock
 from ...core.dates import format_display
 from ...core.models import HomeworkStatus
 from ...core.schedule_service import HomeworkService
+from ...core.subject_names import SubjectNameService
 from ..dialogs import HomeworkDialog
-from ..theme import COLORS
 from ..widgets import EmptyState, SectionHeader, Separator
 
 #: HW-13: четыре фильтра. Выбранный фильтр живёт в сеансе, не в настройках.
@@ -41,21 +42,27 @@ FILTERS = (
 
 
 class HomeworkRowWidget(QFrame):
-    """Строка задания (HW-12): флажок, предмет, описание, дедлайн, действия."""
+    """Строка задания (HW-12): флажок, предмет, описание, дедлайн, действия.
+
+    ``subject_caption`` — подпись предмета по настройкам сокращённых названий
+    (UI-14); полное название остаётся в подсказке.
+    """
 
     toggled = Signal(int)
     edit_requested = Signal(int)
     delete_requested = Signal(int)
 
-    def __init__(self, row, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        row,
+        parent: QWidget | None = None,
+        *,
+        subject_caption: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.row = row
-        self.setObjectName("Card")
-        if row.is_overdue:
-            self.setStyleSheet(
-                f"QFrame#Card {{ background-color: {COLORS['warning_bg']}; "
-                f"border: 1px solid {COLORS['warning']}; border-radius: 6px; }}"
-            )
+        # Просроченная строка — карточка в цветах предупреждения (CardWarning).
+        self.setObjectName("CardWarning" if row.is_overdue else "Card")
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 7, 10, 7)
@@ -71,11 +78,15 @@ class HomeworkRowWidget(QFrame):
         texts = QVBoxLayout()
         texts.setSpacing(1)
 
-        subject = QLabel(row.subject_name)
-        subject.setObjectName("Subtitle")
+        subject = QLabel(subject_caption or row.subject_name)
+        subject.setObjectName(
+            "MutedSubtitle"
+            if row.homework.status == HomeworkStatus.DONE
+            else "Subtitle"
+        )
         subject.setWordWrap(True)
-        if row.homework.status == HomeworkStatus.DONE:
-            subject.setStyleSheet(f"color: {COLORS['text_muted']};")
+        if subject_caption and subject_caption != row.subject_name:
+            subject.setToolTip(row.subject_name)
         texts.addWidget(subject)
 
         description = QLabel(row.short_description or "без описания")
@@ -85,9 +96,8 @@ class HomeworkRowWidget(QFrame):
         texts.addWidget(description)
 
         due = QLabel(f"до {row.due_caption}")
-        due.setObjectName("Small")
+        due.setObjectName("SmallWarning" if row.is_overdue else "Small")
         if row.is_overdue:
-            due.setStyleSheet(f"color: {COLORS['warning_text']}; font-weight: 600;")
             due.setText(f"до {row.due_caption} · просрочено")
         texts.addWidget(due)
         layout.addLayout(texts, 1)
@@ -119,6 +129,7 @@ class HomeworkPage(QWidget):
         # HW-13: фильтр хранится в сеансе.
         self._status_filter = "all"
         self._subject_filter: int | None = None
+        self._query = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -146,6 +157,19 @@ class HomeworkPage(QWidget):
         self.subject_combo.addItem("Все предметы", None)
         self.subject_combo.currentIndexChanged.connect(self._on_subject_changed)
         controls.addWidget(self.subject_combo)
+
+        # HW-13: поиск по тексту задания и названию предмета. Фильтры
+        # комбинируются: «просроченные» + «лаб» даёт просроченные лабораторные.
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по заданию…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(180)
+        self.search_edit.setToolTip(
+            "Ищет по описанию задания и названию предмета. "
+            "Несколько слов — все должны встретиться."
+        )
+        self.search_edit.textChanged.connect(self._on_search_changed)
+        controls.addWidget(self.search_edit)
 
         controls.addStretch(1)
 
@@ -189,6 +213,11 @@ class HomeworkPage(QWidget):
         self._subject_filter = self.subject_combo.currentData()
         self.refresh()
 
+    def _on_search_changed(self, text: str) -> None:
+        """HW-13: перерисовать список по мере ввода."""
+        self._query = text
+        self.refresh()
+
     def _reload_subjects(self) -> None:
         service = HomeworkService(self.db)
         subjects = service.subject_choices()
@@ -208,6 +237,8 @@ class HomeworkPage(QWidget):
     def refresh(self) -> None:
         self._reload_subjects()
         service = HomeworkService(self.db)
+        # UI-14: подписи предметов — по настройкам сокращённых названий.
+        names = SubjectNameService(self.db)
 
         # HW-14: при пустом справочнике — подсказка.
         self.empty.set_caption(service.empty_hint)
@@ -232,6 +263,7 @@ class HomeworkPage(QWidget):
             subject_id=self._subject_filter,
             only_overdue=only_overdue,
             today=clock.today(),
+            query=self._query,
         )
 
         while self.list_layout.count():
@@ -250,14 +282,13 @@ class HomeworkPage(QWidget):
                 f"{group.caption} · {group.count}"
                 if group.count > 1 else group.caption
             )
-            caption.setObjectName("Subtitle")
-            caption.setStyleSheet(
-                f"color: {COLORS['warning_text']};" if group.is_overdue else ""
-            )
+            caption.setObjectName("SubtitleWarning" if group.is_overdue else "Subtitle")
             self.list_layout.addWidget(caption)
 
             for row in group.items:
-                widget = HomeworkRowWidget(row)
+                widget = HomeworkRowWidget(
+                    row, subject_caption=names.display(row.subject_name)
+                )
                 widget.toggled.connect(self.toggle_homework)
                 widget.edit_requested.connect(self.edit_homework)
                 widget.delete_requested.connect(self.delete_homework)
@@ -266,6 +297,29 @@ class HomeworkPage(QWidget):
 
         self.list_layout.addStretch(1)
         self.count_label.setText(f"Заданий: {total}" if total else "")
+
+        # HW-13: «ничего не найдено» и «заданий нет» — разные состояния.
+        # Иначе после неудачного поиска страница предлагала добавить задание,
+        # хотя оно есть — просто не совпало с фильтром.
+        # Приоритет у «совсем пусто»: если в базе нет ни одного задания или нет
+        # предметов, говорить «ничего не найдено» неправильно — фильтр тут ни
+        # при чём, и подсказка должна быть про добавление предмета (HW-14).
+        searching = bool((self._query or "").strip())
+        filtered = searching or self._status_filter != "all" or self._subject_filter is not None
+        nothing_at_all = not service.has_subjects or not service.rows(today=clock.today())
+        if not total:
+            if nothing_at_all:
+                self.empty.set_caption(service.empty_hint)
+                self.empty.set_hint(
+                    "Добавьте предмет в редакторе сетки или справочнике (HW-14)."
+                    if not service.has_subjects else ""
+                )
+            elif filtered:
+                self.empty.set_caption("Ничего не найдено")
+                self.empty.set_hint("Измените запрос или сбросьте фильтры.")
+            else:
+                self.empty.set_caption(service.empty_hint)
+                self.empty.set_hint("")
         self.scroll.setVisible(total > 0)
         self.empty.setVisible(total == 0)
 

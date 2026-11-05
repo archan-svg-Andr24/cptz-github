@@ -867,7 +867,6 @@ def _homework(row: Any) -> Homework:
         status=row["status"],
         created_at=row["created_at"],
         completed_at=row["completed_at"],
-        group_mark=row["group_mark"],
     )
 
 
@@ -983,8 +982,8 @@ class HomeworkRepository:
             raise ValidationError("Предмет не найден", field="subject_id")
         with self.db.transaction() as conn:
             cursor = conn.execute(
-                "INSERT INTO homework(subject_id, group_mark, due_date, description, status, "
-                "created_at) VALUES (?, NULL, ?, ?, 'active', ?)",
+                "INSERT INTO homework(subject_id, due_date, description, status, "
+                "created_at) VALUES (?, ?, ?, 'active', ?)",
                 (subject_id, dt.to_iso(due_date), (description or "").strip() or None, _now()),
             )
             new_id = int(cursor.lastrowid)

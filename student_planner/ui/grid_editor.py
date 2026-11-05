@@ -35,7 +35,7 @@ from ..core.schedule_service import GridService
 from ..core.settings_registry import SettingsKeys
 from ..core.settings_service import SettingsService
 from .dialogs import BaseDialog
-from .theme import COLORS, stylesheet
+from .widgets import Separator
 from .widgets import Badge
 
 log = logging.getLogger(__name__)
@@ -200,6 +200,16 @@ class GridEditorDialog(BaseDialog):
         self.restore_button = QPushButton("Вернуть стартовый набор недели")
         self.restore_button.clicked.connect(self.restore_seed)
         top.addWidget(self.restore_button)
+
+        # GRID-10/FIRST-13: импорт сетки из CSV-файла.
+        self.import_button = QPushButton("Импорт из файла…")
+        self.import_button.setToolTip(
+            "Загрузить расписание из CSV: колонки «день; блок; предмет» "
+            "(необязательно: тип недели, кабинет, преподаватель). "
+            "Существующие пары не удаляются — записываются только строки файла."
+        )
+        self.import_button.clicked.connect(self.import_file)
+        top.addWidget(self.import_button)
         self.layout_.addLayout(top)
 
         hint = QLabel(
@@ -219,12 +229,9 @@ class GridEditorDialog(BaseDialog):
         self.layout_.addWidget(self.table, 1)
 
         self.warning = QLabel()
+        self.warning.setObjectName("WarningBanner")
         self.warning.setWordWrap(True)
         self.warning.setVisible(False)
-        self.warning.setStyleSheet(
-            f"color: {COLORS['warning_text']}; background-color: {COLORS['warning_bg']}; "
-            f"border: 1px solid {COLORS['warning']}; border-radius: 6px; padding: 6px;"
-        )
         self.layout_.addWidget(self.warning)
 
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Готово")
@@ -247,7 +254,9 @@ class GridEditorDialog(BaseDialog):
 
     def refresh(self) -> None:
         self._sync_week_buttons()
-        view = self.service.view(self._week_type, on_date=self._effective_from)
+        view = self.service.view(
+            self._week_type, on_date=self._effective_from
+        )
         subjects = self.service.subjects_for_cell()
 
         self.table.clear()
@@ -322,9 +331,9 @@ class GridEditorDialog(BaseDialog):
     def save_cell(self, profile_id: int, slot_no: int, subject_id) -> None:
         try:
             self.service.set_cell(
-            profile_id, self._week_type, slot_no, subject_id,
-            effective_from=self._effective_from,
-        )
+                profile_id, self._week_type, slot_no, subject_id,
+                effective_from=self._effective_from,
+            )
         except AppError as error:
             log.info("Ячейка не сохранена: %s", error)
             self.show_error(error)
@@ -335,9 +344,9 @@ class GridEditorDialog(BaseDialog):
     def clear_cell(self, profile_id: int, slot_no: int, row: int, column: int) -> None:
         try:
             self.service.clear_cell(
-            profile_id, self._week_type, slot_no,
-            effective_from=self._effective_from,
-        )
+                profile_id, self._week_type, slot_no,
+                effective_from=self._effective_from,
+            )
         except AppError as error:
             self.show_error(error)
             return
@@ -345,6 +354,37 @@ class GridEditorDialog(BaseDialog):
         if isinstance(widget, SubjectCellWidget):
             widget.set_subject(None)
         self._after_change()
+
+    def import_file(self) -> None:
+        """GRID-10: загрузить сетку из CSV.
+
+        Отчёт показывается списком: пользователь должен видеть, какие строки
+        не применились и почему, иначе «импорт прошёл» превращается в гадание.
+        """
+        from PySide6.QtWidgets import QFileDialog
+
+        from ..core.schedule_import import ScheduleImporter
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Импорт расписания", "", "Таблица (*.csv *.txt);;Все файлы (*)"
+        )
+        if not path:
+            return
+        try:
+            report = ScheduleImporter(self.db).parse_file(
+                path, on_date=self._effective_from
+            )
+        except AppError as error:
+            self.show_error(error)
+            return
+        self.refresh()
+        lines = [report.caption]
+        if report.problems:
+            lines.append("")
+            lines.extend(report.problems[:12])
+            if len(report.problems) > 12:
+                lines.append(f"…и ещё {len(report.problems) - 12}")
+        QMessageBox.information(self, "Импорт расписания", "\n".join(lines))
 
     def restore_seed(self) -> None:
         caption = "верхней" if self._week_type == "upper" else "нижней"
